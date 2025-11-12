@@ -18,6 +18,16 @@ compilers = "*" #gets gcc, or gcc = "*"
 gcc = ">=5"
 setuptools = "*" #">=61.0"
 cuda-nvcc = "12.1.*"
+    #need cusparse.h, cublas.h, and cusolverDn.h for mmcv build
+    #mp versions might not be needed
+#cudatoolkit = "*"      #version conflict with cuda-nvcc
+#cudatoolkit-dev = "*"  #doesn't have cusparse.h etc
+cusparselt-dev = "*"
+libcusparse-dev = "*"
+libcublasmp-dev	= "*"
+libcublas-dev = "*"	
+libcusolvermp-dev = "*"
+libcusolver-dev = "*"
 psutil = "*"
 libgl-devel = "*"
 libgfortran = "*"
