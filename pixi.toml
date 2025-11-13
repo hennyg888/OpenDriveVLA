@@ -37,9 +37,10 @@ pip = "*"
 no-build-isolation = ["mmcv-full", "mmdet3d"]
 
 [pypi-dependencies]
+#llava-torch = "==1.2.2.post1"
 numpy = "==1.26.1"
 torch = { version = "==2.1.2", index = "https://download.pytorch.org/whl/cu121" } #need long form with version and index that uses cu12
-OpenDriveVLA = {path = ".", extras = ["train"] }
+OpenDriveVLA = { path = ".", extras = ["train"] }
 #flash-attn = "==2.5.7" #original wanted 2.5.7
 #mmcv-full = {url = "https://download.openmmlab.com/mmcv/dist/cu121/torch2.1.0/mmcv_full-1.7.2-cp39-cp39-manylinux1_x86_64.whl"}
 #mmcv = ">=2.0.0rc4, <2.1.0" #original wanted local thirdparty/mmcv
@@ -54,6 +55,7 @@ casadi = "==3.6.0"
 scipy = "==1.10.1" 
 scikit-image = "==0.19.3"
 fsspec = "*"
+triton = "*"
 #mmdet3d = "==1.0.0rc6" #original wanted local thirdparty/mmdet3d
 
 #mmdet3d = {path = "third_party/mmdetection3d_1_0_0rc6"}
@@ -65,3 +67,6 @@ fsspec = "*"
 
 #transformers = "==4.54.1" #original wanted specific git version
 #llava = {path = "<path in repo>"}
+
+mmcv-full = {path = "third_party/mmcv_1_7_2", extras = ["all"]}
+mmdet3d = {path = "third_party/mmdetection3d_1_0_0rc6"}
