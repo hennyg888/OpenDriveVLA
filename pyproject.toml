@@ -25,7 +25,7 @@ standalone = [
 ]
 
 train = [
-    "llava[standalone]",
+    #"llava[standalone]",
     "numpy==1.26.1",
     "open_clip_torch",
     "fastapi",
