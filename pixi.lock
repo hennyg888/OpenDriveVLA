@@ -3125,7 +3125,7 @@ packages:
 - pypi: ./
   name: opendrivevla
   version: 1.0.0.dev1
-  sha256: 8c5a183eaca37265cdd64efdeb5d7b66e5ec8bbabe575875cc86f5ffbeb2f53b
+  sha256: ba8abe400c023df50e1910518f19bb7963cf8f082d702e97d491efe114ac2b21
   requires_dist:
   - shortuuid ; extra == 'standalone'
   - httpx==0.24.0 ; extra == 'standalone'

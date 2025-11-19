@@ -67,7 +67,7 @@ train = [
 "Homepage" = "https://github.com/DriveVLA/DriveVLA.github.io"
 
 [tool.setuptools.packages.find]
-include = ["llava*", "trl*", "drivevla*"]
+include = ["llava*", "trl*", "drivevla*", "projects*"]
 exclude = [
     "assets*",
     "benchmark*",
