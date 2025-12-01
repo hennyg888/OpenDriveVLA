@@ -1,10 +1,16 @@
+import torch
+import torchvision
 import numpy as np
 from numpy import random
 import mmcv
 from mmdet.datasets.builder import PIPELINES
 from mmcv.parallel import DataContainer as DC
+from mmcv.utils import build_from_cfg
 from mmdet3d.datasets.pipelines.transforms_3d import ObjectRangeFilter, ObjectNameFilter
-from mmdet3d.core.bbox import CameraInstance3DBoxes, DepthInstance3DBoxes, LiDARInstance3DBoxes
+from mmdet3d.core.bbox import CameraInstance3DBoxes, DepthInstance3DBoxes, LiDARInstance3DBoxes, box_np_ops
+from projects.mmdet3d_plugin.datasets.builder import OBJECTSAMPLERS
+from typing import Dict, Any
+from PIL import Image
 
 @PIPELINES.register_module()
 class PadMultiViewImage(object):
@@ -497,3 +503,344 @@ class CustomObjectNameFilter(ObjectNameFilter):
         # results['ann_tokens'] = results['ann_tokens'][gt_bboxes_mask]
 
         return results
+
+@PIPELINES.register_module()
+class ObjectPaste:
+    """Sample GT objects to the data.
+    Args:
+        db_sampler (dict): Config dict of the database sampler.
+        sample_2d (bool): Whether to also paste 2D image patch to the images
+            This should be true when applying multi-modality cut-and-paste.
+            Defaults to False.
+    """
+
+    def __init__(self, db_sampler, sample_2d=False, stop_epoch=None):
+        self.sampler_cfg = db_sampler
+        self.sample_2d = sample_2d
+        if "type" not in db_sampler.keys():
+            db_sampler["type"] = "DataBaseSampler"
+        self.db_sampler = build_from_cfg(db_sampler, OBJECTSAMPLERS)
+        self.epoch = -1
+        self.stop_epoch = stop_epoch
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
+    @staticmethod
+    def remove_points_in_boxes(points, boxes):
+        """Remove the points in the sampled bounding boxes.
+        Args:
+            points (:obj:`BasePoints`): Input point cloud array.
+            boxes (np.ndarray): Sampled ground truth boxes.
+        Returns:
+            np.ndarray: Points with those in the boxes removed.
+        """
+        masks = box_np_ops.points_in_rbbox(points.coord.numpy(), boxes)
+        points = points[np.logical_not(masks.any(-1))]
+        return points
+
+    def __call__(self, data):
+        """Call function to sample ground truth objects to the data.
+        Args:
+            data (dict): Result dict from loading pipeline.
+        Returns:
+            dict: Results after object sampling augmentation, \
+                'points', 'gt_bboxes_3d', 'gt_labels_3d' keys are updated \
+                in the result dict.
+        """
+        if self.stop_epoch is not None and self.epoch >= self.stop_epoch:
+            return data
+        gt_bboxes_3d = data["gt_bboxes_3d"]
+        gt_labels_3d = data["gt_labels_3d"]
+
+        # change to float for blending operation
+        points = data["points"]
+        if self.sample_2d:
+            img = data["img"]
+            gt_bboxes_2d = data["gt_bboxes"]
+            # Assume for now 3D & 2D bboxes are the same
+            sampled_dict = self.db_sampler.sample_all(
+                gt_bboxes_3d.tensor.numpy(),
+                gt_labels_3d,
+                gt_bboxes_2d=gt_bboxes_2d,
+                img=img,
+            )
+        else:
+            sampled_dict = self.db_sampler.sample_all(
+                gt_bboxes_3d.tensor.numpy(), gt_labels_3d, img=None
+            )
+
+        if sampled_dict is not None:
+            sampled_gt_bboxes_3d = sampled_dict["gt_bboxes_3d"]
+            sampled_points = sampled_dict["points"]
+            sampled_gt_labels = sampled_dict["gt_labels_3d"]
+
+            gt_labels_3d = np.concatenate([gt_labels_3d, sampled_gt_labels], axis=0)
+            gt_bboxes_3d = gt_bboxes_3d.new_box(
+                np.concatenate([gt_bboxes_3d.tensor.numpy(), sampled_gt_bboxes_3d])
+            )
+
+            points = self.remove_points_in_boxes(points, sampled_gt_bboxes_3d)
+            # check the points dimension
+            points = points.cat([sampled_points, points])
+
+            if self.sample_2d:
+                sampled_gt_bboxes_2d = sampled_dict["gt_bboxes_2d"]
+                gt_bboxes_2d = np.concatenate(
+                    [gt_bboxes_2d, sampled_gt_bboxes_2d]
+                ).astype(np.float32)
+
+                data["gt_bboxes"] = gt_bboxes_2d
+                data["img"] = sampled_dict["img"]
+
+        data["gt_bboxes_3d"] = gt_bboxes_3d
+        data["gt_labels_3d"] = gt_labels_3d.astype(np.long)
+        data["points"] = points
+
+        return data
+    
+@PIPELINES.register_module()
+class GlobalRotScaleTrans_3D:
+    def __init__(self, resize_lim, rot_lim, trans_lim, is_train):
+        self.resize_lim = resize_lim
+        self.rot_lim = rot_lim
+        self.trans_lim = trans_lim
+        self.is_train = is_train
+
+    def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        transform = np.eye(4).astype(np.float32)
+
+        if self.is_train:
+            scale = random.uniform(*self.resize_lim)
+            theta = random.uniform(*self.rot_lim)
+            translation = np.array([random.normal(0, self.trans_lim) for i in range(3)])
+            rotation = np.eye(3)
+
+            if "points" in data:
+                data["points"].rotate(-theta)
+                data["points"].translate(translation)
+                data["points"].scale(scale)
+
+            if "radar" in data:
+                data["radar"].rotate(-theta)
+                data["radar"].translate(translation)
+                data["radar"].scale(scale)
+
+            gt_boxes = data["gt_bboxes_3d"]
+            rotation = rotation @ gt_boxes.rotate(theta).numpy()
+            gt_boxes.translate(translation)
+            gt_boxes.scale(scale)
+            data["gt_bboxes_3d"] = gt_boxes
+
+            transform[:3, :3] = rotation.T * scale
+            transform[:3, 3] = translation * scale
+
+        data["lidar_aug_matrix"] = transform
+        return data
+
+@PIPELINES.register_module()
+class GTDepth:
+    def __init__(self, keyframe_only=False):
+        self.keyframe_only = keyframe_only 
+
+    def __call__(self, data):
+        sensor2ego = data['camera2ego'].data
+        cam_intrinsic = data['camera_intrinsics'].data 
+        img_aug_matrix = data['img_aug_matrix'].data 
+        bev_aug_matrix = data['lidar_aug_matrix'].data
+        lidar2ego = data['lidar2ego'].data 
+        camera2lidar = data['camera2lidar'].data
+        lidar2image = data['lidar2image'].data
+
+        rots = sensor2ego[..., :3, :3]
+        trans = sensor2ego[..., :3, 3]
+        intrins = cam_intrinsic[..., :3, :3]
+        post_rots = img_aug_matrix[..., :3, :3]
+        post_trans = img_aug_matrix[..., :3, 3]
+        lidar2ego_rots = lidar2ego[..., :3, :3]
+        lidar2ego_trans = lidar2ego[..., :3, 3]
+        camera2lidar_rots = camera2lidar[..., :3, :3]
+        camera2lidar_trans = camera2lidar[..., :3, 3]
+
+        points = data['points'].data 
+        img = data['img'].data
+
+        if self.keyframe_only:
+            points = points[points[:, 4] == 0]
+
+        batch_size = len(points)
+        depth = torch.zeros(img.shape[0], *img.shape[-2:]) #.to(points[0].device)
+
+        # for b in range(batch_size):
+        cur_coords = points[:, :3]
+
+        # inverse aug
+        cur_coords -= bev_aug_matrix[:3, 3]
+        cur_coords = torch.inverse(bev_aug_matrix[:3, :3]).matmul(
+            cur_coords.transpose(1, 0)
+        )
+        # lidar2image
+        cur_coords = lidar2image[:, :3, :3].matmul(cur_coords)
+        cur_coords += lidar2image[:, :3, 3].reshape(-1, 3, 1)
+        # get 2d coords
+        dist = cur_coords[:, 2, :]
+        cur_coords[:, 2, :] = torch.clamp(cur_coords[:, 2, :], 1e-5, 1e5)
+        cur_coords[:, :2, :] /= cur_coords[:, 2:3, :]
+
+        # imgaug
+        cur_coords = img_aug_matrix[:, :3, :3].matmul(cur_coords)
+        cur_coords += img_aug_matrix[:, :3, 3].reshape(-1, 3, 1)
+        cur_coords = cur_coords[:, :2, :].transpose(1, 2)
+
+        # normalize coords for grid sample
+        cur_coords = cur_coords[..., [1, 0]]
+
+        on_img = (
+            (cur_coords[..., 0] < img.shape[2])
+            & (cur_coords[..., 0] >= 0)
+            & (cur_coords[..., 1] < img.shape[3])
+            & (cur_coords[..., 1] >= 0)
+        )
+        for c in range(on_img.shape[0]):
+            masked_coords = cur_coords[c, on_img[c]].long()
+            masked_dist = dist[c, on_img[c]]
+            depth[c, masked_coords[:, 0], masked_coords[:, 1]] = masked_dist
+
+        data['depths'] = depth 
+        return data
+    
+@PIPELINES.register_module()
+class GridMask:
+    def __init__(
+        self,
+        use_h,
+        use_w,
+        max_epoch,
+        rotate=1,
+        offset=False,
+        ratio=0.5,
+        mode=0,
+        prob=1.0,
+        fixed_prob=False,
+    ):
+        self.use_h = use_h
+        self.use_w = use_w
+        self.rotate = rotate
+        self.offset = offset
+        self.ratio = ratio
+        self.mode = mode
+        self.st_prob = prob
+        self.prob = prob
+        self.epoch = None
+        self.max_epoch = max_epoch
+        self.fixed_prob = fixed_prob
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+        if not self.fixed_prob:
+            self.set_prob(self.epoch, self.max_epoch)
+
+    def set_prob(self, epoch, max_epoch):
+        self.prob = self.st_prob * self.epoch / self.max_epoch
+
+    def __call__(self, results):
+        if np.random.rand() > self.prob:
+            return results
+        imgs = results["img"]
+        h = imgs[0].shape[0]
+        w = imgs[0].shape[1]
+        self.d1 = 2
+        self.d2 = min(h, w)
+        hh = int(1.5 * h)
+        ww = int(1.5 * w)
+        d = np.random.randint(self.d1, self.d2)
+        if self.ratio == 1:
+            self.l = np.random.randint(1, d)
+        else:
+            self.l = min(max(int(d * self.ratio + 0.5), 1), d - 1)
+        mask = np.ones((hh, ww), np.float32)
+        st_h = np.random.randint(d)
+        st_w = np.random.randint(d)
+        if self.use_h:
+            for i in range(hh // d):
+                s = d * i + st_h
+                t = min(s + self.l, hh)
+                mask[s:t, :] *= 0
+        if self.use_w:
+            for i in range(ww // d):
+                s = d * i + st_w
+                t = min(s + self.l, ww)
+                mask[:, s:t] *= 0
+
+        r = np.random.randint(self.rotate)
+        mask = Image.fromarray(np.uint8(mask))
+        mask = mask.rotate(r)
+        mask = np.asarray(mask)
+        mask = mask[
+            (hh - h) // 2 : (hh - h) // 2 + h, (ww - w) // 2 : (ww - w) // 2 + w
+        ]
+
+        mask = mask.astype(np.float32)
+        mask = mask[:, :, None]
+        if self.mode == 1:
+            mask = 1 - mask
+
+        # mask = mask.expand_as(imgs[0])
+        if self.offset:
+            offset = torch.from_numpy(2 * (np.random.rand(h, w) - 0.5)).float()
+            offset = (1 - mask) * offset
+            imgs = [x * mask + offset for x in imgs]
+        else:
+            imgs = [x * mask for x in imgs]
+
+        results.update(img=imgs)
+        return results
+    
+@PIPELINES.register_module()
+class ImageNormalize:
+    def __init__(self, mean, std):
+        self.mean = mean
+        self.std = std
+        self.compose = torchvision.transforms.Compose(
+            [
+                torchvision.transforms.ToTensor(),
+                torchvision.transforms.Normalize(mean=mean, std=std),
+            ]
+        )
+
+    def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        data["img"] = [self.compose(img) for img in data["img"]]
+        data["img_norm_cfg"] = dict(mean=self.mean, std=self.std)
+        return data
+    
+@PIPELINES.register_module()
+class BEVRandomFlip3D:
+    def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        flip_horizontal = random.choice([0, 1])
+        flip_vertical = random.choice([0, 1])
+
+        rotation = np.eye(3)
+        if flip_horizontal:
+            rotation = np.array([[1, 0, 0], [0, -1, 0], [0, 0, 1]]) @ rotation
+            if "points" in data:
+                data["points"].flip("horizontal")
+            if "radar" in data:
+                data["radar"].flip("horizontal")
+            if "gt_bboxes_3d" in data:
+                data["gt_bboxes_3d"].flip("horizontal")
+            if "gt_masks_bev" in data:
+                data["gt_masks_bev"] = data["gt_masks_bev"][:, :, ::-1].copy()
+
+        if flip_vertical:
+            rotation = np.array([[-1, 0, 0], [0, 1, 0], [0, 0, 1]]) @ rotation
+            if "points" in data:
+                data["points"].flip("vertical")
+            if "radar" in data:
+                data["radar"].flip("vertical")
+            if "gt_bboxes_3d" in data:
+                data["gt_bboxes_3d"].flip("vertical")
+            if "gt_masks_bev" in data:
+                data["gt_masks_bev"] = data["gt_masks_bev"][:, ::-1, :].copy()
+
+        data["lidar_aug_matrix"][:3, :] = rotation @ data["lidar_aug_matrix"][:3, :]
+        return data

@@ -10,3 +10,5 @@ from .models.utils import *
 from .models.opt.adamw import AdamW2
 from .uniad import *
 from .losses import *
+from .bevfusion import *
+from .models import *
