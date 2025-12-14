@@ -844,3 +844,131 @@ class BEVRandomFlip3D:
 
         data["lidar_aug_matrix"][:3, :] = rotation @ data["lidar_aug_matrix"][:3, :]
         return data
+
+@PIPELINES.register_module()
+class ImageAug3D:
+    def __init__(
+        self, final_dim, resize_lim, bot_pct_lim, rot_lim, rand_flip, is_train
+    ):
+        self.final_dim = final_dim
+        self.resize_lim = resize_lim
+        self.bot_pct_lim = bot_pct_lim
+        self.rand_flip = rand_flip
+        self.rot_lim = rot_lim
+        self.is_train = is_train
+
+    def sample_augmentation(self, results):
+        ori_shape = results["ori_shape"]
+
+        if isinstance(ori_shape, (list, tuple)) and isinstance(ori_shape[0], (list, tuple)):
+            # multi-view: [(H, W, C), ...]
+            H, W = ori_shape[0][:2]
+        else:
+            # single-view: (H, W, C)
+            H, W = ori_shape[:2]
+
+        fH, fW = self.final_dim
+        if self.is_train:
+            resize = np.random.uniform(*self.resize_lim)
+            resize_dims = (int(W * resize), int(H * resize))
+            newW, newH = resize_dims
+            crop_h = int((1 - np.random.uniform(*self.bot_pct_lim)) * newH) - fH
+            crop_w = int(np.random.uniform(0, max(0, newW - fW)))
+            crop = (crop_w, crop_h, crop_w + fW, crop_h + fH)
+            flip = False
+            if self.rand_flip and np.random.choice([0, 1]):
+                flip = True
+            rotate = np.random.uniform(*self.rot_lim)
+        else:
+            resize = np.mean(self.resize_lim)
+            resize_dims = (int(W * resize), int(H * resize))
+            newW, newH = resize_dims
+            crop_h = int((1 - np.mean(self.bot_pct_lim)) * newH) - fH
+            crop_w = int(max(0, newW - fW) / 2)
+            crop = (crop_w, crop_h, crop_w + fW, crop_h + fH)
+            flip = False
+            rotate = 0
+        return resize, resize_dims, crop, flip, rotate
+
+    def img_transform(
+        self, img, rotation, translation, resize, resize_dims, crop, flip, rotate
+    ):
+        if isinstance(img, np.ndarray):
+            # img is HWC (uint8) usually
+            if img.dtype != np.uint8:
+                img = img.astype(np.uint8)
+            img = Image.fromarray(img)
+        elif not isinstance(img, Image.Image):
+            # some frameworks may wrap ndarray-like objects
+            img = np.array(img)
+            if img.dtype != np.uint8:
+                img = img.astype(np.uint8)
+            img = Image.fromarray(img)
+            
+        # adjust image
+        img = img.resize(resize_dims)
+        img = img.crop(crop)
+        if flip:
+            img = img.transpose(method=Image.FLIP_LEFT_RIGHT)
+        img = img.rotate(rotate)
+
+        # post-homography transformation
+        rotation *= resize
+        translation -= torch.Tensor(crop[:2])
+        if flip:
+            A = torch.Tensor([[-1, 0], [0, 1]])
+            b = torch.Tensor([crop[2] - crop[0], 0])
+            rotation = A.matmul(rotation)
+            translation = A.matmul(translation) + b
+        theta = rotate / 180 * np.pi
+        A = torch.Tensor(
+            [
+                [np.cos(theta), np.sin(theta)],
+                [-np.sin(theta), np.cos(theta)],
+            ]
+        )
+        b = torch.Tensor([crop[2] - crop[0], crop[3] - crop[1]]) / 2
+        b = A.matmul(-b) + b
+        rotation = A.matmul(rotation)
+        translation = A.matmul(translation) + b
+        img = np.asarray(img)
+
+        return img, rotation, translation
+
+    def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        imgs = data["img"]
+        new_imgs = []
+        transforms = []
+        for img in imgs:
+            resize, resize_dims, crop, flip, rotate = self.sample_augmentation(data)
+            post_rot = torch.eye(2)
+            post_tran = torch.zeros(2)
+            new_img, rotation, translation = self.img_transform(
+                img,
+                post_rot,
+                post_tran,
+                resize=resize,
+                resize_dims=resize_dims,
+                crop=crop,
+                flip=flip,
+                rotate=rotate,
+            )
+            transform = torch.eye(4)
+            transform[:2, :2] = rotation
+            transform[:2, 3] = translation
+            new_imgs.append(new_img)
+            transforms.append(transform.numpy())
+        for im in new_imgs:
+            assert isinstance(im, np.ndarray), type(im)
+        data["img"] = new_imgs
+        # update the calibration matrices
+        data["img_aug_matrix"] = transforms
+        return data
+    
+@PIPELINES.register_module()
+class PointsToTensor:
+    def __call__(self, results):
+        if "points" in results:
+            # LiDARPoints → torch.Tensor
+            results["points"] = results["points"].tensor
+        return results

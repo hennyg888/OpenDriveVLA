@@ -138,7 +138,16 @@ class BEVFormerTrackHead(DETRHead):
             for m in self.cls_branches:
                 nn.init.constant_(m[-1].bias, bias_init)
     
-    def get_bev_features(self, mlvl_feats, img_metas, prev_bev=None):
+    def get_bev_features(self, mlvl_feats, img_metas, prev_bev=None, external_bev=None):
+        if external_bev is not None:
+            if external_bev.dim() == 4:
+                B, C, H, W = external_bev.shape
+                bev_embed = external_bev.flatten(2).permute(2, 0, 1)
+            else:
+                bev_embed = external_bev
+            bev_pos = None
+            return bev_embed, bev_pos
+        
         bs, num_cam, _, _, _ = mlvl_feats[0].shape
         dtype = mlvl_feats[0].dtype
         bev_queries = self.bev_embedding.weight.to(dtype)

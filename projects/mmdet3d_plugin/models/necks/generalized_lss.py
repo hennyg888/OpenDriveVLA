@@ -85,11 +85,14 @@ class GeneralizedLSSFPN(BaseModule):
 
         # build top-down path
         used_backbone_levels = len(laterals) - 1
+        upsample_cfg = self.upsample_cfg.copy()
+        if "type" in upsample_cfg:
+            upsample_cfg["mode"] = upsample_cfg.pop("type")
         for i in range(used_backbone_levels - 1, -1, -1):
             x = F.interpolate(
                 laterals[i + 1],
                 size=laterals[i].shape[2:],
-                **self.upsample_cfg,
+                **upsample_cfg,
             )
             laterals[i] = torch.cat([laterals[i], x], dim=1)
             laterals[i] = self.lateral_convs[i](laterals[i])

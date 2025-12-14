@@ -4,7 +4,8 @@ import logging.handlers
 import os
 import sys
 import numpy as np
-
+import torch
+import torch.nn.functional as F
 import requests
 
 from llava.constants import LOGDIR
@@ -189,3 +190,26 @@ def pretty_print_semaphore(semaphore):
     if semaphore is None:
         return "None"
     return f"Semaphore(value={semaphore._value}, locked={semaphore.locked()})"
+
+def pad_bevfeature(bevfeature, target_size):
+    _, _, H, W = bevfeature.size()
+    target_H, target_W = target_size
+    assert H <= target_H, f"Height {H} exceeds maximum size {target_H}"
+    assert W <= target_W, f"Width {W} exceeds maximum size {target_W}"
+    
+    # Calculate padding sizes
+    pad_h = target_H - H
+    pad_w = target_W - W
+    
+    # F.pad parameter order is (left, right, top, bottom)
+    # Distribute padding evenly across both sides
+    pad_left = 0
+    pad_right = pad_w
+    pad_top = 0
+    pad_bottom = pad_h
+    
+    # Apply zero padding
+    padded_tensor = F.pad(bevfeature, (pad_left, pad_right, pad_top, pad_bottom), 
+                          mode='constant', value=0)
+    
+    return padded_tensor

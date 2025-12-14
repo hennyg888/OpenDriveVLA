@@ -498,10 +498,16 @@ class NuScenesE2EDataset(NuScenesDataset):
         gt_bboxes = torch.tensor(np.stack(gt_bboxes))
         gt_masks = torch.stack(gt_masks)
 
+        pts_filename = info['lidar_path']
+        if not os.path.exists(pts_filename):
+            rel_path = os.path.basename(os.path.dirname(pts_filename))
+            pts_filename = os.path.join(
+                self.data_root, "samples", "LIDAR_TOP", os.path.basename(pts_filename)
+            )
         # standard protocal modified from SECOND.Pytorch
         input_dict = dict(
             sample_idx=info['token'],
-            pts_filename=info['lidar_path'],
+            pts_filename=pts_filename,
             sweeps=info['sweeps'],
             ego2global_translation=info['ego2global_translation'],
             ego2global_rotation=info['ego2global_rotation'],
@@ -538,7 +544,10 @@ class NuScenesE2EDataset(NuScenesDataset):
             lidar2cam_rts = []
             cam_intrinsics = []
             for cam_type, cam_info in info['cams'].items():
-                image_paths.append(cam_info['data_path'])
+                img_path = cam_info['data_path']
+                if not os.path.isabs(img_path):
+                    img_path = os.path.join(self.data_root, img_path)
+                image_paths.append(img_path)
                 # obtain lidar to image transformation matrix
                 lidar2cam_r = np.linalg.inv(cam_info['sensor2lidar_rotation'])
                 lidar2cam_t = cam_info[
@@ -608,6 +617,42 @@ class NuScenesE2EDataset(NuScenesDataset):
         # generate detection labels for current + future frames
         input_dict['occ_future_ann_infos'] = \
             self.get_future_detection_infos(future_frames)
+            
+        lidar2ego = np.eye(4, dtype=np.float32)
+        lidar2ego[:3, :3] = Quaternion(info['lidar2ego_rotation']).rotation_matrix
+        lidar2ego[:3, 3] = info['lidar2ego_translation']
+        camera2ego = []
+
+        for cam_type, cam_info in info['cams'].items():
+            c2e = np.eye(4, dtype=np.float32)
+            c2e[:3, :3] = Quaternion(cam_info['sensor2ego_rotation']).rotation_matrix
+            c2e[:3, 3] = cam_info['sensor2ego_translation']
+            camera2ego.append(c2e)
+        lidar2camera = []
+        camera2lidar = []
+
+        for cam_info in info['cams'].values():
+            # camera -> lidar
+            c2l = np.eye(4, dtype=np.float32)
+            c2l[:3, :3] = cam_info['sensor2lidar_rotation']
+            c2l[:3, 3] = cam_info['sensor2lidar_translation']
+            camera2lidar.append(c2l)
+
+            # lidar -> camera
+            l2c = np.linalg.inv(c2l)
+            lidar2camera.append(l2c)
+            
+        input_dict.update(
+            dict(
+                lidar2ego=lidar2ego,
+                camera2ego=camera2ego,
+                lidar2camera=lidar2camera,
+                camera2lidar=camera2lidar,
+                camera_intrinsics=cam_intrinsics,
+                lidar2image=lidar2img_rts,
+            )
+        )
+
         return input_dict
 
     def get_future_detection_infos(self, future_frames):

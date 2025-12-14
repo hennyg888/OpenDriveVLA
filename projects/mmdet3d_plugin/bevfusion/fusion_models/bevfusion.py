@@ -24,8 +24,8 @@ class BEVFusion(Base3DFusionModel):
         self,
         encoders: Dict[str, Any],
         fuser: Dict[str, Any],
-        decoder: Dict[str, Any],
-        heads: Dict[str, Any],
+        decoder: Dict[str, Any] = None,
+        heads: Dict[str, Any] = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -70,24 +70,32 @@ class BEVFusion(Base3DFusionModel):
         else:
             self.fuser = None
 
-        self.decoder = nn.ModuleDict(
-            {
-                "backbone": build_backbone(decoder["backbone"]),
-                "neck": build_neck(decoder["neck"]),
-            }
-        )
-        self.heads = nn.ModuleDict()
-        for name in heads:
-            if heads[name] is not None:
-                self.heads[name] = build_head(heads[name])
-
-        if "loss_scale" in kwargs:
-            self.loss_scale = kwargs["loss_scale"]
+        if decoder is not None:
+            self.decoder = nn.ModuleDict(
+                {
+                    "backbone": build_backbone(decoder["backbone"]),
+                    "neck": build_neck(decoder["neck"]),
+                }
+            )
         else:
-            self.loss_scale = dict()
+            self.decoder = None
+        
+        self.heads = nn.ModuleDict()
+        if heads is not None:
             for name in heads:
                 if heads[name] is not None:
-                    self.loss_scale[name] = 1.0
+                    self.heads[name] = build_head(heads[name])
+
+            if "loss_scale" in kwargs:
+                self.loss_scale = kwargs["loss_scale"]
+            else:
+                self.loss_scale = dict()
+                for name in heads:
+                    if heads[name] is not None:
+                        self.loss_scale[name] = 1.0
+        else:
+            self.heads = None 
+            self.loss_scale = None
 
         # If the camera's vtransform is a BEVDepth version, then we're using depth loss. 
         self.use_depth_loss = ((encoders.get('camera', {}) or {}).get('vtransform', {}) or {}).get('type', '') in ['BEVDepth', 'AwareBEVDepth', 'DBEVDepth', 'AwareDBEVDepth']
@@ -114,7 +122,10 @@ class BEVFusion(Base3DFusionModel):
         lidar_aug_matrix,
         img_metas,
         gt_depths=None,
+        return_2d_features=False,
     ) -> torch.Tensor:
+        if x.dim() == 6:
+            x = x.squeeze(2) 
         B, N, C, H, W = x.size()
         x = x.view(B * N, C, H, W)
 
@@ -126,7 +137,8 @@ class BEVFusion(Base3DFusionModel):
 
         BN, C, H, W = x.size()
         x = x.view(B, int(BN / B), C, H, W)
-
+        if return_2d_features:
+            cam_2d_feature = x
         x = self.encoders["camera"]["vtransform"](
             x,
             points,
@@ -143,7 +155,10 @@ class BEVFusion(Base3DFusionModel):
             depth_loss=self.use_depth_loss, 
             gt_depths=gt_depths,
         )
-        return x
+        if return_2d_features:
+            return x, cam_2d_feature
+        else:
+            return x, None
     
     def extract_features(self, x, sensor) -> torch.Tensor:
         feats, coords, sizes = self.voxelize(x, sensor)
@@ -247,7 +262,7 @@ class BEVFusion(Base3DFusionModel):
         if isinstance(img, list):
             raise NotImplementedError
         else:
-            outputs = self.forward_single(
+            bevfeature, camerafeature = self.forward_single(
                 img,
                 points,
                 camera2ego,
@@ -266,7 +281,7 @@ class BEVFusion(Base3DFusionModel):
                 gt_labels_3d,
                 **kwargs,
             )
-            return outputs
+            return bevfeature, camerafeature
 
     @auto_fp16(apply_to=("img", "points"))
     def forward_single(
@@ -290,12 +305,13 @@ class BEVFusion(Base3DFusionModel):
         **kwargs,
     ):
         features = []
+        camera_features = None
         auxiliary_losses = {}
         for sensor in (
             self.encoders if self.training else list(self.encoders.keys())[::-1]
         ):
             if sensor == "camera":
-                feature = self.extract_camera_features(
+                feature, camera_features  = self.extract_camera_features(
                     img,
                     points,
                     radar,
@@ -309,6 +325,7 @@ class BEVFusion(Base3DFusionModel):
                     lidar_aug_matrix,
                     metas,
                     gt_depths=depths,
+                    return_2d_features=True,
                 )
                 if self.use_depth_loss:
                     feature, auxiliary_losses['depth'] = feature[0], feature[-1]
@@ -330,7 +347,10 @@ class BEVFusion(Base3DFusionModel):
         else:
             assert len(features) == 1, features
             x = features[0]
-
+            
+        if self.decoder is None and self.heads is None:
+            return x, camera_features
+        
         batch_size = x.shape[0]
 
         x = self.decoder["backbone"](x)
@@ -356,7 +376,7 @@ class BEVFusion(Base3DFusionModel):
                     outputs["loss/depth"] = auxiliary_losses['depth']
                 else:
                     raise ValueError('Use depth loss is true, but depth loss not found')
-            return outputs
+            return outputs, camera_features
         else:
             outputs = [{} for _ in range(batch_size)]
             for type, head in self.heads.items():
@@ -382,4 +402,4 @@ class BEVFusion(Base3DFusionModel):
                         )
                 else:
                     raise ValueError(f"unsupported head: {type}")
-            return outputs
+            return outputs, camera_features

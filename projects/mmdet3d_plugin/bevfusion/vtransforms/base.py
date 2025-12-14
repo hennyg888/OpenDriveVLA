@@ -10,6 +10,60 @@ def boolmask2idx(mask):
     # A utility function, workaround for ONNX not supporting 'nonzero'
     return torch.nonzero(mask).squeeze(1).tolist()
 
+def _to_BN44(mat, B: int, N: int, device=None, dtype=None):
+    """
+    Convert camera / sensor matrices to torch.Tensor with shape [B, N, 4, 4].
+
+    Supports:
+      - Tensor [4,4], [N,4,4], [B,4,4], [B,N,4,4]
+      - list of Tensor [4,4] (len = N)
+      - list of Tensor [B,4,4] (len = N)
+    """
+
+    # -------- case 1: list --------
+    if isinstance(mat, list):
+        # list of Tensor
+        if torch.is_tensor(mat[0]):
+            # [N, 4, 4]
+            if mat[0].dim() == 2:
+                t = torch.stack(mat, dim=0)           # [N,4,4]
+                t = t.unsqueeze(0).expand(B, N, 4, 4) # [B,N,4,4]
+            # [N, B, 4, 4]
+            elif mat[0].dim() == 3:
+                t = torch.stack(mat, dim=1)           # [B,N,4,4]
+            else:
+                raise ValueError(f"Unsupported tensor dim in list: {mat[0].dim()}")
+        else:
+            # list of numbers / numpy
+            t = torch.tensor(mat)
+    else:
+        # -------- case 2: tensor / numpy --------
+        t = torch.as_tensor(mat)
+
+        if t.dim() == 2:          # [4,4]
+            t = t.unsqueeze(0).unsqueeze(0).expand(B, N, 4, 4)
+        elif t.dim() == 3:
+            if t.shape[0] == N:   # [N,4,4]
+                t = t.unsqueeze(0).expand(B, N, 4, 4)
+            elif t.shape[0] == B: # [B,4,4]
+                t = t.unsqueeze(1).expand(B, N, 4, 4)
+            else:
+                raise ValueError(f"Unexpected 3D shape: {tuple(t.shape)}")
+        elif t.dim() == 4:
+            # [B,N,4,4]
+            pass
+        else:
+            raise ValueError(f"Unexpected mat dim: {t.dim()}")
+
+    # -------- device / dtype --------
+    if device is not None:
+        t = t.to(device)
+    if dtype is not None and t.dtype != dtype:
+        t = t.to(dtype)
+
+    return t.contiguous()
+
+
 def gen_dx_bx(xbound, ybound, zbound):
     dx = torch.Tensor([row[2] for row in [xbound, ybound, zbound]])
     bx = torch.Tensor([row[0] + row[2] / 2.0 for row in [xbound, ybound, zbound]])
@@ -49,6 +103,7 @@ class BaseTransform(nn.Module):
         assert depth_input in ['scalar', 'one-hot']
         self.height_expand = height_expand
         self.add_depth_features = add_depth_features
+        self.expect_single_depth_channel = False
 
         dx, bx, nx = gen_dx_bx(self.xbound, self.ybound, self.zbound)
         self.dx = nn.Parameter(dx, requires_grad=False)
@@ -189,6 +244,19 @@ class BaseTransform(nn.Module):
         lidar_aug_matrix,
         **kwargs,
     ):
+        B = img.shape[0]
+        N = img.shape[1]
+        dev = img.device
+        dt = img.dtype
+
+        camera2ego = _to_BN44(camera2ego, B, N, device=dev, dtype=dt)
+        camera_intrinsics = _to_BN44(camera_intrinsics, B, N, device=dev, dtype=dt)
+        img_aug_matrix = _to_BN44(img_aug_matrix, B, N, device=dev, dtype=dt)
+        camera2lidar = _to_BN44(camera2lidar, B, N, device=dev, dtype=dt)
+        lidar2image = _to_BN44(lidar2image, B, N, device=dev, dtype=dt)
+
+
+        lidar_aug_matrix = _to_BN44(lidar_aug_matrix, B, 1, device=dev, dtype=dt)[:, 0]  # -> [B,4,4]
         rots = camera2ego[..., :3, :3]
         trans = camera2ego[..., :3, 3]
         intrins = camera_intrinsics[..., :3, :3]
@@ -251,6 +319,20 @@ class BaseDepthTransform(BaseTransform):
         metas,
         **kwargs,
     ):
+        B = img.shape[0]
+        N = img.shape[1]
+        dev = img.device
+        dt = img.dtype
+
+        sensor2ego = _to_BN44(sensor2ego, B, N, device=dev, dtype=dt)
+        cam_intrinsic = _to_BN44(cam_intrinsic, B, N, device=dev, dtype=dt)
+        img_aug_matrix = _to_BN44(img_aug_matrix, B, N, device=dev, dtype=dt)
+        camera2lidar = _to_BN44(camera2lidar, B, N, device=dev, dtype=dt)
+
+        lidar2ego = _to_BN44(lidar2ego, B, 1, device=dev, dtype=dt)[:, 0]            # [B,4,4]
+        lidar_aug_matrix = _to_BN44(lidar_aug_matrix, B, 1, device=dev, dtype=dt)[:, 0]
+        lidar2image = _to_BN44(lidar2image, B, N, device=dev, dtype=dt)
+
         rots = sensor2ego[..., :3, :3]
         trans = sensor2ego[..., :3, 3]
         intrins = cam_intrinsic[..., :3, :3]
@@ -344,6 +426,8 @@ class BaseDepthTransform(BaseTransform):
             'bda_mat': lidar_aug_matrix,
             'sensor2ego_mats': sensor2ego, 
         }
+        if getattr(self, "expect_single_depth_channel", False):
+            depth = depth[:, :, :1]
         x = self.get_cam_feats(img, depth, mats_dict)
 
         use_depth = False
