@@ -71,7 +71,7 @@ class BEVFusionTrackMapModel(PreTrainedModel):
         track_map_former_model = build_model(track_map_former_mmlab.model, test_cfg=track_map_former_mmlab.get('test_cfg', None))
         if self.load_mmdet3d_weights:
             bevfusion_checkpoint = load_checkpoint(bevfusion_model, '/home/s56cai/ckpt/bevfusion/bevfusion-det.pth', map_location='cpu')
-            track_map_former_checkpoint = load_checkpoint(track_map_former_model, '/home/s56cai/ckpt/bevfusion/track_map_former.pth', map_location='cpu')
+            track_map_former_checkpoint = load_checkpoint(track_map_former_model, '/home/s56cai/ckpt/uniad_stage1/uniad_base_track_map.pth', map_location='cpu')
             
             if 'CLASSES' in bevfusion_checkpoint.get('meta', {}):
                 bevfusion_model.CLASSES = bevfusion_checkpoint['meta']['CLASSES']
@@ -103,8 +103,8 @@ class BEVFusionTrackMapVisionTower(nn.Module):
     def __init__(self, vision_tower, vision_tower_cfg, delay_load=False):
         super().__init__()
         
-        bevfusion_config_dict = Config.fromfile('projects/configs/bevfusion/bevfusion-det.py').to_dict()
-        track_map_former_config_dict = Config.fromfile('projects/configs/stage1_track_map/track_map_former.py').to_dict()
+        bevfusion_config_dict = Config.fromfile('projects/configs/bevfusion_track_map/bevfusion.py').to_dict()
+        track_map_former_config_dict = Config.fromfile('projects/configs/bevfusion_track_map/track_map_former.py').to_dict()
         self.config = BevFusionTrackMapConfig(bevfusion_config_dict=bevfusion_config_dict, track_map_former_config_dict=track_map_former_config_dict)
 
         self.vision_tower_name = vision_tower
