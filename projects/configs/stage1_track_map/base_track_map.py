@@ -14,10 +14,8 @@ plugin = True
 plugin_dir = "projects/mmdet3d_plugin/"
 # If point cloud range is changed, the models should also change their point
 # cloud range accordingly
-#point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
-point_cloud_range = [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
-#voxel_size = [0.2, 0.2, 8]
-voxel_size = [0.075, 0.075, 0.2]
+point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
+voxel_size = [0.2, 0.2, 8]
 patch_size = [102.4, 102.4]
 img_norm_cfg = dict(mean=[103.530, 116.280, 123.675], std=[1.0, 1.0, 1.0], to_rgb=False)
 # For nuScenes we usually do 10-class detection
@@ -342,22 +340,12 @@ model = dict(
     ),
  
     # model training and testing settings
-    # from OpenDriveVLA/projects/configs/bevfusion/bevfusion_lidar-cam_voxel0075_second_secfpn_8xb4-cyclic-20e_nus-3d.py
-    #  test_cfg=dict(
-    #             dataset="nuScenes",
-    #             grid_size=[1440, 1440, 41],
-    #             out_size_factor=8,
-    #             voxel_size=voxel_size[:2],
-    #             pc_range=point_cloud_range[:2],
-    #             nms_type=None),
     train_cfg=dict(
         pts=dict(
-            #grid_size=[512, 512, 1],
-            grid_size=[1440, 1440, 41],
-            voxel_size=voxel_size[:2],      #not sure of [:2] is necessary
-            point_cloud_range=point_cloud_range[:2],
-            #out_size_factor=4,
-            out_size_factor=8,
+            grid_size=[512, 512, 1],
+            voxel_size=voxel_size,
+            point_cloud_range=point_cloud_range,
+            out_size_factor=4,
             assigner=dict(
                 type="HungarianAssigner3D",
                 cls_cost=dict(type="FocalLossCost", weight=2.0),
@@ -367,7 +355,6 @@ model = dict(
                 ),  # Fake cost. This is just to make it compatible with DETR head.
                 pc_range=point_cloud_range,
             ),
-            nms_type=None,
         )
     ),
 )
