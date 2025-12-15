@@ -77,7 +77,64 @@ model = dict(
     video_test_mode=True,
     num_query=900,
     num_classes=10,
-    pc_range=point_cloud_range,    
+    pc_range=point_cloud_range,
+    img_backbone=dict(
+        type="ResNet",
+        depth=101,
+        num_stages=4,
+        out_indices=(1, 2, 3),
+        frozen_stages=4,
+        norm_cfg=dict(type="BN2d", requires_grad=False),
+        norm_eval=True,
+        style="caffe",
+        dcn=dict(
+            type="DCNv2", deform_groups=1, fallback_on_stride=False
+        ),  # original DCNv2 will print log when perform load_state_dict
+        stage_with_dcn=(False, False, True, True),
+    ),
+    img_neck=dict(
+        type="FPN",
+        in_channels=[512, 1024, 2048],
+        out_channels=_dim_,
+        start_level=0,
+        add_extra_convs="on_output",
+        num_outs=4,
+        relu_before_extra_convs=True,
+    ),
+    freeze_img_backbone=True,
+    freeze_img_neck=False,
+    freeze_bn=False,
+    score_thresh=0.4,
+    filter_score_thresh=0.35,
+    qim_args=dict(
+        qim_type="QIMBase",
+        merger_dropout=0,
+        update_query_pos=True,
+        fp_ratio=0.3,
+        random_drop=0.1,
+    ),  # hyper-param for query dropping mentioned in MOTR
+    mem_args=dict(
+        memory_bank_type="MemoryBank",
+        memory_bank_score_thresh=0.0,
+        memory_bank_len=4,
+    ),
+    loss_cfg=dict(
+        type="ClipMatcher",
+        num_classes=10,
+        weight_dict=None,
+        code_weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2],
+        assigner=dict(
+            type="HungarianAssigner3DTrack",
+            cls_cost=dict(type="FocalLossCost", weight=2.0),
+            reg_cost=dict(type="BBox3DL1Cost", weight=0.25),
+            pc_range=point_cloud_range,
+        ),
+        loss_cls=dict(
+            type="FocalLoss", use_sigmoid=True, gamma=2.0, alpha=0.25, loss_weight=2.0
+        ),
+        loss_bbox=dict(type="L1Loss", loss_weight=0.25),
+        loss_past_traj_weight=0.0,
+    ),  # loss cfg for tracking
     pts_bbox_head=dict(
         type="BEVFormerTrackHead",
         bev_h=bev_h_,
@@ -194,12 +251,25 @@ model = dict(
         num_classes=4,
         num_things_classes=3,
         num_stuff_classes=1,
-        in_channels=_dim_, 
+        in_channels=_dim_,
         sync_cls_avg_factor=True,
         as_two_stage=False,
         with_box_refine=True,
         transformer=dict(
             type='SegDeformableTransformer',
+            encoder=dict(
+                type='DetrTransformerEncoder',
+                num_layers=6,
+                transformerlayers=dict(
+                    type='BaseTransformerLayer',
+                    attn_cfgs=dict(
+                        type='MultiScaleDeformableAttention',
+                        embed_dims=_dim_,
+                        num_levels=_num_levels_,
+                         ),
+                    feedforward_channels=_feed_dim_,
+                    ffn_dropout=0.1,
+                    operation_order=('self_attn', 'norm', 'ffn', 'norm'))),
             decoder=dict(
                 type='DeformableDetrTransformerDecoder',
                 num_layers=6,
@@ -257,9 +327,11 @@ model = dict(
                 ),
             sampler =dict(type='PseudoSampler'),
             sampler_with_mask =dict(type='PseudoSampler_segformer'),
-        )
-    )
+        ),
+    ),
+
 )
+
 
 dataset_type = "NuScenesE2EDataset"
 data_root = "data/nuscenes/"

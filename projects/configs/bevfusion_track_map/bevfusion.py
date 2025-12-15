@@ -18,6 +18,12 @@ load_dim = 5
 use_dim = 5
 load_augmented = None
 
+occflow_grid_conf = {
+    'xbound': [-50.0, 50.0, 0.5],
+    'ybound': [-50.0, 50.0, 0.5],
+    'zbound': [-10.0, 10.0, 20.0],
+}
+
 voxel_size = [0.075, 0.075, 0.2]
 point_cloud_range = [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
 image_size = [256, 704]
@@ -258,6 +264,15 @@ test_pipeline = [
         use_dim=[0,1,2,3,4],
         pad_empty_sweeps=True,
         remove_close=True),
+    dict(type='LoadAnnotations3D_E2E', 
+         with_bbox_3d=False,
+         with_label_3d=False, 
+         with_attr_label=False,
+
+         with_future_anns=True,
+         with_ins_inds_3d=False,
+         ins_inds_add_1=True, # ins_inds start from 1
+    ),
     dict(
         type="ImageAug3D",
         final_dim=image_size,
@@ -276,10 +291,24 @@ test_pipeline = [
         type="ImageNormalize",
         mean=[0.485, 0.456, 0.406],
         std=[0.229, 0.224, 0.225]),
+    dict(
+    type='GenerateOccFlowLabels',
+    grid_conf=occflow_grid_conf,
+    ignore_index=255,
+    only_vehicle=True,
+    filter_invisible=False),
     dict(type="PointsToTensor"),
     dict(
-        type="Collect3D",
-        keys=["img", "points"],
+        type="CustomCollect3D",
+        keys=["img", 
+              "points",
+              "timestamp",
+              "l2g_r_mat",
+              "l2g_t",
+              "gt_lane_labels",
+              "gt_lane_bboxes",
+              "gt_lane_masks",
+              "gt_segmentation"],
         meta_keys=(
             "camera2ego",
             "lidar2ego",

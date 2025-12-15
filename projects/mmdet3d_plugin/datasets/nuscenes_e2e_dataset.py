@@ -271,7 +271,12 @@ class NuScenesE2EDataset(NuScenesDataset):
         data_dict = {}
         for key, value in example.items():
             if 'l2g' in key:
-                data_dict[key] = to_tensor(value[0])
+                v = value
+                if isinstance(v, (list, tuple)):
+                    v = v[0]
+                if isinstance(v, np.generic):
+                    v = v.item()
+                data_dict[key] = to_tensor(v)
             else:
                 data_dict[key] = value
         return data_dict

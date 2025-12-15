@@ -7,33 +7,22 @@ import torch
 from mmcv import Config
 from mmdet3d.datasets import build_dataset, build_dataloader
 from mmcv.parallel import DataContainer as DC
-
+from llava.utils import pad_bevfeature
 
 def unwrap_dc(x):
     return x.data if isinstance(x, DC) else x
 
+
 def unwrap_metas(img_metas):
-    # unwrap DataContainer
     if isinstance(img_metas, DC):
         img_metas = img_metas.data
+    while isinstance(img_metas, list):
+        img_metas = img_metas[0]
+    assert isinstance(img_metas, dict)
+    return img_metas, [img_metas]
 
-    # peel lists until we hit dict
-    metas = img_metas
-    while isinstance(metas, list):
-        if len(metas) == 0:
-            raise ValueError("Empty img_metas list")
-        metas = metas[0]
-
-    if not isinstance(metas, dict):
-        raise TypeError(f"Unexpected meta type: {type(metas)}")
-
-    meta0 = metas
-
-    # rebuild metas as List[Dict] (batch dimension)
-    return meta0, [meta0]
 
 def to_torch_list(x, device):
-    """list[np.ndarray or Tensor] -> list[Tensor] on device"""
     out = []
     for a in x:
         if torch.is_tensor(a):
@@ -42,82 +31,44 @@ def to_torch_list(x, device):
             out.append(torch.from_numpy(a).to(device))
     return out
 
+def to_device(x, device):
+    if x is None:
+        return None
+    if torch.is_tensor(x):
+        return x.to(device)
+    if isinstance(x, list):
+        return [to_device(xx) for xx in x]
+    return x
+
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Test BEVFusion encoder-only checkpoint loading"
-    )
-    parser.add_argument("config")
-    parser.add_argument("checkpoint")
+    parser = argparse.ArgumentParser("BEVFusion → Track_Map_Former test")
+    parser.add_argument("--bevfusion-config", default='projects/configs/bevfusion_track_map/bevfusion.py')
+    parser.add_argument("--bevfusion-ckpt", default='/home/s56cai/ckpt/bevfusion/bevfusion-det.pth')
+    parser.add_argument("--track-config", default='projects/configs/bevfusion_track_map/track_map_former.py')
+    parser.add_argument("--track-ckpt", default='/home/s56cai/ckpt/uniad_stage1/uniad_base_track_map.pth')
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--show-model", action="store_true")
     return parser.parse_args()
 
 
-def load_partial_checkpoint(model, ckpt_path):
-    print("\n[CKPT] Loading PARTIAL checkpoint (encoders + fuser only)")
-
-    ckpt = torch.load(ckpt_path, map_location="cpu")
-    state_dict = ckpt.get("state_dict", ckpt)
-
-    keep_prefix = ("encoders.", "fuser.")
-    filtered_state_dict = {
-        k: v for k, v in state_dict.items() if k.startswith(keep_prefix)
-    }
-
-    missing_keys, unexpected_keys = model.load_state_dict(
-        filtered_state_dict, strict=False
-    )
-
-    print(f"[CKPT] Loaded keys: {len(filtered_state_dict)}")
-    print(f"[CKPT] Missing keys: {len(missing_keys)}")
-    print(f"[CKPT] Unexpected keys: {len(unexpected_keys)}")
-
-    return ckpt
-
 def main():
     args = parse_args()
+    device = torch.device(args.device)
 
-    print("=" * 80)
-    print(f"Loading config: {args.config}")
-    print("=" * 80)
+    cfg_bf = Config.fromfile(args.bevfusion_config)
 
-    cfg = Config.fromfile(args.config)
-
-    if getattr(cfg, "plugin", False):
-        plugin_dir = cfg.get("plugin_dir", "projects/mmdet3d_plugin/")
-        project_root = os.getcwd()
-
-        if project_root not in sys.path:
-            sys.path.insert(0, project_root)
-        plugin_abs_path = os.path.join(project_root, plugin_dir)
-        if plugin_abs_path not in sys.path:
-            sys.path.insert(0, plugin_abs_path)
-
+    if cfg_bf.get("plugin", False):
+        sys.path.insert(0, os.getcwd())
+        sys.path.insert(0, os.path.join(os.getcwd(), cfg_bf.plugin_dir))
         importlib.import_module("projects.mmdet3d_plugin")
-        print("[PLUGIN] Plugin imported successfully")
-
-    cfg.model.decoder = None
-    cfg.model.heads = None
-    cfg.model.train_cfg = None
-
-    if "camera" in cfg.model.encoders:
-        cfg.model.encoders.camera.backbone.init_cfg = None
 
     from projects.mmdet3d_plugin.models.builder import build_model
-    model = build_model(cfg.model, test_cfg=cfg.get("test_cfg"))
 
-    if args.show_model:
-        print(model)
+    bevfusion = build_model(cfg_bf.model).to(device).eval()
+    ckpt = torch.load(args.bevfusion_ckpt, map_location="cpu")
+    bevfusion.load_state_dict(ckpt["state_dict"], strict=False)
 
-    load_partial_checkpoint(model, args.checkpoint)
-
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    model = model.to(device).eval()
-
-
-    cfg.data.test.test_mode = True
-    dataset = build_dataset(cfg.data.test)
+    dataset = build_dataset(cfg_bf.data.test)
     dataloader = build_dataloader(
         dataset,
         samples_per_gpu=1,
@@ -126,19 +77,29 @@ def main():
         shuffle=False,
     )
 
-    print(f"[DATA] Test dataset size: {len(dataset)}")
-
     data = next(iter(dataloader))
 
-    print("\n[INPUT]")
-    for k, v in data.items():
-        print(f"  {k}: {type(v)}")
-
-
+    # unwrap inputs
     img = unwrap_dc(data["img"])
     points = unwrap_dc(data["points"])
     meta0, metas = unwrap_metas(data["img_metas"])
+    timestamp = unwrap_dc(data.get("timestamp", None))
+    l2g_r_mat = unwrap_dc(data.get("l2g_r_mat", None))
+    l2g_t     = unwrap_dc(data.get("l2g_t", None))
 
+    gt_lane_labels = unwrap_dc(data.get("gt_lane_labels", None))
+    gt_lane_bboxes = unwrap_dc(data.get("gt_lane_bboxes", None))
+    gt_lane_masks  = unwrap_dc(data.get("gt_lane_masks", None))
+
+    timestamp = to_device(timestamp, device)
+    l2g_r_mat = to_device(l2g_r_mat, device)
+    l2g_t     = to_device(l2g_t, device)
+    gt_lane_labels = to_device(gt_lane_labels, device)
+    gt_lane_bboxes = to_device(gt_lane_bboxes, device)
+    gt_lane_masks  = to_device(gt_lane_masks, device)
+    print("gt_lane_masks type:", type(data["gt_lane_masks"]))
+    print("gt_lane_masks shape:", getattr(data["gt_lane_masks"], "shape", None))
+    print("gt_segmentation shape:", data.get("gt_segmentation", None).shape if "gt_segmentation" in data else None)
 
     # points: Tensor [1, N, 5] -> list[Tensor(N,5)]
     if torch.is_tensor(points):
@@ -161,12 +122,8 @@ def main():
     img_aug_matrix = to_torch_list(meta0["img_aug_matrix"], device)
     lidar_aug_matrix = torch.from_numpy(meta0["lidar_aug_matrix"]).to(device)
 
-    # no depth supervision in test
-    depths = None
-
-
     with torch.no_grad():
-        bevfeature, camerafeature = model(
+        bevfeature, camerafeature = bevfusion(
             img=img,
             points=points,
             camera2ego=camera2ego,
@@ -178,16 +135,58 @@ def main():
             img_aug_matrix=img_aug_matrix,
             lidar_aug_matrix=lidar_aug_matrix,
             metas=metas,
-            depths=depths,
+            depths=None,
             radar=None,
-            gt_masks_bev=None,
-            gt_bboxes_3d=None,
-            gt_labels_3d=None,
         )
 
-    print("\n[OUTPUT]")
-    print(f"  bevfeature:   {tuple(bevfeature.shape)}")
-    print(f"  camerafeature:{tuple(camerafeature.shape)}")
+    print("[BEVFusion]")
+    print("  bevfeature:", bevfeature.shape)
+    print("  camerafeature:", camerafeature.shape)
+    from mmdet3d.models import build_model as build_mmdet3d_model
+    cfg_tm = Config.fromfile(args.track_config)
+    cfg_tm.model.pop("train_cfg", None)
+    cfg_tm.model.pop("test_cfg", None)
+    model_tm = build_mmdet3d_model(cfg_tm.model).to(device).eval()
+
+    ckpt_tm = torch.load(args.track_ckpt, map_location="cpu")
+    model_tm.load_state_dict(ckpt_tm["state_dict"], strict=False)
+    bevfeature = pad_bevfeature(bevfeature, target_size=(200, 200))
+    if bevfeature.dim() == 4:
+        B, C, H, W = bevfeature.shape
+        bev_embed = bevfeature.flatten(2).permute(2, 0, 1).contiguous()
+    else:
+        bev_embed = bevfeature
+
+    with torch.no_grad():
+        outputs = model_tm.forward_test(
+            bev_embed=bev_embed,
+            img_feat_2D=camerafeature,
+            img_metas=metas,
+
+            # seg eval / IOU needs these
+            gt_lane_labels=gt_lane_labels,
+            gt_lane_masks=gt_lane_masks,
+            gt_lane_bboxes=gt_lane_bboxes,
+            rescale=False,
+
+            # optional (usually unused in your feature-only Track_Map_Former)
+            timestamp=timestamp,
+            l2g_r_mat=l2g_r_mat,
+            l2g_t=l2g_t,
+        )
+
+
+    print("\n[Track_Map_Former]")
+    print("  keys:", outputs.keys())
+    print("  track queries:",
+          None if outputs["result_track"]["track_query_embeddings"] is None
+          else outputs["result_track"]["track_query_embeddings"].shape)
+
+    if outputs["result_seg"] is not None:
+        print("  map queries:",
+              outputs["result_seg"]["chosen_output_query_things"].shape)
+
+    print("\n✅ SUCCESS: BEVFusion → Track_Map_Former pipeline runs.")
 
 
 if __name__ == "__main__":
