@@ -89,12 +89,13 @@ class BEVFusionTrackMapModel(PreTrainedModel):
         pass
 
     def forward(self, data):
+        print("bevfusion_track_map forward data keys: ", data.keys())
         if self.vision_tower_test_mode:
-            bevfeature = self.bevfusion(data)
+            bevfeature = self.bevfusion(**data)
             padded_bevfeature = pad_bevfeature(bevfeature, target_size=(200, 200))
             _, results_for_vlm = self.track_map_former(padded_bevfeature, return_loss=False, rescale=True)
         else:
-            bevfeature = self.bevfusion(data)
+            bevfeature = self.bevfusion(**data)
             padded_bevfeature = pad_bevfeature(bevfeature, target_size=(200, 200))
             _, results_for_vlm = self.track_map_former(padded_bevfeature, return_loss=False, rescale=True)
         return results_for_vlm

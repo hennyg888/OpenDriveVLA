@@ -245,7 +245,7 @@ class LLaVANuScenesDataset(NuScenesE2EDataset):
             else:
                 uniad_data[key] = value
         uniad_data_dict = {"uniad_data": uniad_data}
-        uniad_data_dict['uniad_data']['img_metas'][0]._data.pop('box_type_3d')
+        #uniad_data_dict['uniad_data']['img_metas'][0]._data.pop('box_type_3d')
         return uniad_data_dict
 
     def _get_llava_train_data(self, idx):

@@ -171,7 +171,8 @@ def inference_planning_oriented_vlm(args):
     tokenizer, model_engine, image_processor, context_len = load_model_with_deepspeed(args, device)
     model_engine.eval()
 
-    uniad_cfg: Config = Config.fromfile("projects/configs/stage1_track_map/base_track_map.py")
+    #uniad_cfg: Config = Config.fromfile("projects/configs/stage1_track_map/base_track_map.py")
+    uniad_cfg: Config = Config.fromfile("projects/configs/bevfusion_track_map/bevfusion.py")
     data_args = DataArguments(
         data_path=args.data,
         lazy_preprocess=True,
@@ -298,7 +299,7 @@ def main():
     # Set multiprocessing start method
     mp.set_start_method("spawn", force=True)
 
-    model_path_default = "checkpoints/DriveVLA-Qwen2.5-0.5B-Instruct"
+    model_path_default = "/home/s56cai/ckpt/opendrivevla_0.5B_ckpt"
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", type=str, default=model_path_default)
