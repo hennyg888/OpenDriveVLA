@@ -13,7 +13,7 @@ import pickle
 from llava.train.train import preprocess
 from llava.conversation import conv_templates
 from llava.mm_utils import tokenizer_uniad_token
-
+from mmcv.parallel import DataContainer as DC
 import transformers
 
 from mmdet.datasets.pipelines import to_tensor
@@ -245,7 +245,13 @@ class LLaVANuScenesDataset(NuScenesE2EDataset):
             else:
                 uniad_data[key] = value
         uniad_data_dict = {"uniad_data": uniad_data}
-        #uniad_data_dict['uniad_data']['img_metas'][0]._data.pop('box_type_3d')
+        img_metas = uniad_data_dict['uniad_data']['img_metas']
+        if isinstance(img_metas, DC):
+            data = img_metas.data
+            if isinstance(data, list):
+                data[0].pop('box_type_3d', None)
+            elif isinstance(data, dict):
+                data.pop('box_type_3d', None)
         return uniad_data_dict
 
     def _get_llava_train_data(self, idx):
