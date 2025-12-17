@@ -65,8 +65,6 @@ def load_model_with_deepspeed(args, device):
 
     # DeepSpeed inference configuration
     ds_config = {
-        "fp16": {"enabled": args.fp16},
-        "bf16": {"enabled": args.bf16},
         "zero_optimization": {
             "stage": 0
         },
@@ -96,8 +94,8 @@ def inference_data(data, model_engine, tokenizer, args):
     qa_instance_ind = data.get("qa_instance_ind", None)
     
     with torch.inference_mode():
-        with torch.cuda.amp.autocast(dtype=torch.bfloat16 if args.bf16 else torch.float16):
-            cont = model_engine.generate(
+        # with torch.cuda.amp.autocast(dtype=torch.bfloat16 if args.bf16 else torch.float16):
+        cont = model_engine.generate(
                 input_ids,
                 uniad_data=uniad_data,
                 uniad_pth=uniad_pth,

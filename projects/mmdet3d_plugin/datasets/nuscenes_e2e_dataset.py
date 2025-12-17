@@ -435,6 +435,15 @@ class NuScenesE2EDataset(NuScenesDataset):
         assert gt_past_traj.shape[0] == gt_labels_3d.shape[0]
         return anns_results
 
+    def _fix_nuscenes_path(self, path):
+        if path is None:
+            return None
+        if os.path.isabs(path):
+            if "nuscenes/" in path:
+                path = path.split("nuscenes/")[-1]
+            path = os.path.join(self.data_root, path)
+        return path
+    
     def get_data_info(self, index):
         """Get data info according to the given index.
 
@@ -509,11 +518,17 @@ class NuScenesE2EDataset(NuScenesDataset):
             pts_filename = os.path.join(
                 self.data_root, "samples", "LIDAR_TOP", os.path.basename(pts_filename)
             )
+        fixed_sweeps = []
+        for sweep in info.get('sweeps', []):
+            sweep = sweep.copy()
+            sweep['data_path'] = self._fix_nuscenes_path(sweep['data_path'])
+            fixed_sweeps.append(sweep)
+
         # standard protocal modified from SECOND.Pytorch
         input_dict = dict(
             sample_idx=info['token'],
             pts_filename=pts_filename,
-            sweeps=info['sweeps'],
+            sweeps=fixed_sweeps,
             ego2global_translation=info['ego2global_translation'],
             ego2global_rotation=info['ego2global_rotation'],
             prev_idx=info['prev'],

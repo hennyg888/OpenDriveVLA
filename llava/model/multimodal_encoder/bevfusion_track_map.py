@@ -33,14 +33,13 @@ def to_tensor_list(x, device):
         else:
             out.append(torch.from_numpy(a).to(device))
     return out
-
 def to_device_optional(x, device):
     if x is None:
         return None
     if torch.is_tensor(x):
         return x.to(device, non_blocking=True)
     if isinstance(x, list):
-        return [to_device_optional(xx) for xx in x]
+        return [to_device_optional(xx, device) for xx in x]
     return x
 
 def unwrap_metas(img_metas):
@@ -102,6 +101,7 @@ class BEVFusionTrackMapModel(PreTrainedModel):
                     importlib.import_module("projects.mmdet3d_plugin")
 
         device = torch.device("cuda", torch.cuda.current_device())
+        print(f"Building BEVFusion and TrackMapFormer models...{device}")
         bevfusion_config_mmlab.model.pretrained = None
         bevfusion_config_mmlab.model.train_cfg = None
         bevfusion_model = build_fusion_model(bevfusion_config_mmlab.model)
@@ -115,7 +115,9 @@ class BEVFusionTrackMapModel(PreTrainedModel):
             track_map_former_model.load_state_dict(track_map_former_checkpoint["state_dict"], strict=False)
             bevfusion_model = bevfusion_model.to(device)
             track_map_former_model = track_map_former_model.to(device)
-
+            bevfusion_model.float()
+            track_map_former_model.float()
+            
             bevfusion_model.eval()
             track_map_former_model.eval()
             
@@ -171,26 +173,34 @@ class BEVFusionTrackMapModel(PreTrainedModel):
             timestamp = to_device_optional(unwrap_dc(data.get("timestamp", None)), device)
             l2g_r_mat = to_device_optional(unwrap_dc(data.get("l2g_r_mat", None)), device)
             l2g_t = to_device_optional(unwrap_dc(data.get("l2g_t", None)), device)
-
-            gt_lane_labels = to_device_optional(unwrap_dc(data.get("gt_lane_labels", None)), device)
-            gt_lane_bboxes = to_device_optional(unwrap_dc(data.get("gt_lane_bboxes", None)), device)
-            gt_lane_masks = to_device_optional(unwrap_dc(data.get("gt_lane_masks", None)), device)
-
-            bevfeature, camerafeature = self.bevfusion(
-                img=img,
-                points=points,
-                camera2ego=camera2ego,
-                lidar2ego=lidar2ego,
-                lidar2camera=lidar2camera,
-                lidar2image=lidar2image,
-                camera_intrinsics=camera_intrinsics,
-                camera2lidar=camera2lidar,
-                img_aug_matrix=img_aug_matrix,
-                lidar_aug_matrix=lidar_aug_matrix,
-                metas=metas,
-                depths=None,
-                radar=None,
-            )
+            gt_lane_labels = to_device_optional((data.get("gt_lane_labels", None)), device)
+            gt_lane_bboxes = to_device_optional((data.get("gt_lane_bboxes", None)), device)
+            gt_lane_masks = to_device_optional((data.get("gt_lane_masks", None)), device)
+            if gt_lane_masks is not None:
+                if gt_lane_masks.dim() == 3:
+                    gt_lane_masks = gt_lane_masks.unsqueeze(0) 
+            if gt_lane_bboxes is not None:
+                if gt_lane_bboxes.dim() == 2:
+                    gt_lane_bboxes = gt_lane_bboxes.unsqueeze(0)
+            if gt_lane_labels is not None:
+                if gt_lane_labels.dim() ==1:
+                    gt_lane_labels = gt_lane_labels.unsqueeze(0)
+            with torch.cuda.amp.autocast(enabled=False):
+                bevfeature, camerafeature = self.bevfusion(
+                    img=img,
+                    points=points,
+                    camera2ego=camera2ego,
+                    lidar2ego=lidar2ego,
+                    lidar2camera=lidar2camera,
+                    lidar2image=lidar2image,
+                    camera_intrinsics=camera_intrinsics,
+                    camera2lidar=camera2lidar,
+                    img_aug_matrix=img_aug_matrix,
+                    lidar_aug_matrix=lidar_aug_matrix,
+                    metas=metas,
+                    depths=None,
+                    radar=None,
+                )
 
             bevfeature = pad_bevfeature(bevfeature, target_size=(200, 200))
             B, C, H, W = bevfeature.shape
@@ -252,7 +262,7 @@ class BEVFusionTrackMapVisionTower(nn.Module):
         if self.is_loaded:
             rank0_print("{} is already loaded, `load_model` called again, skipping.".format(self.vision_tower_name))
             return
-
+        
         if self.vision_tower_pretrained:
             # Check if vision_tower_name points to a valid pretrained model path
             load_from_transformers_pretrained = (

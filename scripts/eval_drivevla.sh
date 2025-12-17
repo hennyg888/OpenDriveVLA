@@ -25,7 +25,7 @@ PYTHONPATH="$(pwd)":$PYTHONPATH \
 torchrun --nproc_per_node=${NUM_GPU} \
     drivevla/inference_drivevla.py \
     --num-workers 4 \
-    --bf16 \
+    --fp16 \
     --model-path ${CKPT_PATH} \
     --output ${PLAN_CONV_PATH} \
     2>&1 | tee -a ${EVAL_LOG_FILE}
