@@ -7,7 +7,7 @@ import os.path as osp
 
 from transformers.modeling_utils import PreTrainedModel
 from transformers import PretrainedConfig
-from llava.utils import rank0_print, pad_bevfeature
+from llava.utils import rank0_print
 from mmcv.parallel import DataContainer as DC
 from mmengine import Config
 from mmcv.runner import load_checkpoint
@@ -59,6 +59,27 @@ class BevFusionTrackMapConfig(PretrainedConfig):
         self.bevfusion_config_dict = bevfusion_config_dict
         self.track_map_former_config_dict = track_map_former_config_dict
 
+
+class BEVFeatureLinearResizer(nn.Module):
+    """
+    Single Linear layer that maps spatial grid (H*W) -> (target_h*target_w)
+    applied independently per channel and per batch.
+    Input: (B, C, H, W) -> Output: (B, C, target_h, target_w)
+    """
+    def __init__(self, in_hw: int, out_hw: int, out_shape=(200, 200)):
+        super().__init__()
+        self.in_hw = in_hw
+        self.out_hw = out_hw
+        self.out_shape = out_shape
+        self.linear = nn.Linear(in_hw, out_hw, bias=True)
+
+    def forward(self, x: torch.Tensor):
+        B, C, H, W = x.shape
+        x = x.view(B * C, H * W)                 # (B*C, in_hw)
+        x = self.linear(x)                       # (B*C, out_hw)
+        x = x.view(B, C, self.out_shape[0], self.out_shape[1])
+        return x
+
 class BEVFusionTrackMapModel(PreTrainedModel):
     config_class = BevFusionTrackMapConfig
     base_model_prefix = "bevfusion_track_map"
@@ -74,6 +95,8 @@ class BEVFusionTrackMapModel(PreTrainedModel):
         self.vision_tower_test_mode = vision_tower_test_mode
         # build the Bevfusion_Track_Map model
         self.bevfusion, self.track_map_former = self.build_bevfusion_track_map_model()
+        # linear resizer for BEV features, created lazily on first use
+        self.bev_resizer_linear: Optional[nn.Module] = None
 
     def build_bevfusion_track_map_model(self):
         bevfusion_config_mmlab = Config()
@@ -135,6 +158,33 @@ class BEVFusionTrackMapModel(PreTrainedModel):
     def _init_weights(self, module):
         """Initialize the weights"""
         pass
+
+    def _bevfeature_linear_resize(self, bevfeature: torch.Tensor, target_size=(200, 200)):
+        """
+        Resize BEV feature from (B, C, H, W)  -> (B, C, target_h, target_w) using a single Linear layer
+        that maps flattened H*W -> target_h*target_w applied per (B, C).
+        The linear module is created lazily on first use and will match the device and dtype of inputs.
+        """
+        B, C, H, W = bevfeature.shape
+        in_hw = H * W
+        out_h, out_w = target_size
+        out_hw = out_h * out_w
+        device = bevfeature.device
+        dtype = bevfeature.dtype
+
+        # create a new linear resizer if needed or sizes changed
+        if (self.bev_resizer_linear is None or
+            getattr(self.bev_resizer_linear, "in_hw", None) != in_hw or
+            getattr(self.bev_resizer_linear, "out_hw", None) != out_hw or
+            getattr(self.bev_resizer_linear, "out_shape", None) != target_size):
+
+            self.bev_resizer_linear = BEVFeatureLinearResizer(in_hw=in_hw, out_hw=out_hw, out_shape=target_size)
+            # move to device & cast params to correct dtype
+            self.bev_resizer_linear.to(device=device)
+            for p in self.bev_resizer_linear.parameters():
+                p.data = p.data.to(dtype)
+
+        return self.bev_resizer_linear(bevfeature)
 
     def forward(self, data):
         if self.vision_tower_test_mode:
@@ -202,7 +252,10 @@ class BEVFusionTrackMapModel(PreTrainedModel):
                     radar=None,
                 )
 
-            bevfeature = pad_bevfeature(bevfeature, target_size=(200, 200))
+            #print("BEV feature shape before resizing:", bevfeature.shape)
+            bevfeature = self._bevfeature_linear_resize(bevfeature, target_size=(200, 200))
+            #print("BEV feature shape after resizing:", bevfeature.shape)
+            #raise RuntimeError("breaking execution")
             B, C, H, W = bevfeature.shape
             bev_embed = bevfeature.flatten(2).permute(2, 0, 1).contiguous()
 
@@ -220,7 +273,7 @@ class BEVFusionTrackMapModel(PreTrainedModel):
             )
         else:
             bevfeature = self.bevfusion(data)
-            padded_bevfeature = pad_bevfeature(bevfeature, target_size=(200, 200))
+            padded_bevfeature = self._bevfeature_linear_resize(bevfeature, target_size=(200, 200))
             _, results_for_vlm = self.track_map_former(padded_bevfeature, return_loss=False, rescale=True)
         return results_for_vlm
 
