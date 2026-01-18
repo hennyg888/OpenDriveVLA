@@ -12,7 +12,8 @@ If starting pixi shell and encountering problems with flash-attn not finding tor
 If building mmcv-full with `MMCV_WITH_OPS="1"` but still encountering `ModuleNotFoundError: No module named 'mmcv._ext'` error, then manually build mmcv extensions by going into mmcv dir and using `python setup.py build_ext`
 Once built, build files will persists across pixi shell restarts and cleans. To remove build files for thirdparty modules, use git module deep clean `git clean -dfx`
 
-##With Inference Passing
+### With Inference Passing
+
 if flash-attn doesn't install via pixi, comment out all mentions of flash-attn in pyproject.tom and pixi.toml and manually enter pixi shell then pip install flash-attn==2.5.7 or whichever version needed
 
 exiting pixi shell then re-entering pixi shell sometimes will fix weird errors such as mmcv._ext compiled and installed but not importable and cannot be found
