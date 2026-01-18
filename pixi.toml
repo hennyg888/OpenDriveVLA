@@ -56,6 +56,7 @@ scipy = "==1.10.1"
 scikit-image = "==0.19.3"
 fsspec = "*"
 triton = "*"
+shapely = "==1.8.5.post1"
 #mmdet3d = "==1.0.0rc6" #original wanted local thirdparty/mmdet3d
 
 #mmdet3d = {path = "third_party/mmdetection3d_1_0_0rc6"}
@@ -68,5 +69,5 @@ triton = "*"
 #transformers = "==4.54.1" #original wanted specific git version
 #llava = {path = "<path in repo>"}
 
-mmcv-full = {path = "third_party/mmcv_1_7_2", extras = ["all"]}
-mmdet3d = {path = "third_party/mmdetection3d_1_0_0rc6"}
+#mmcv-full = {path = "third_party/mmcv_1_7_2", extras = ["all"]}
+#mmdet3d = {path = "third_party/mmdetection3d_1_0_0rc6"}
