@@ -22,6 +22,14 @@ class Track_Map_Former(UniADTrack):
 
         self.seg_head = build_head(seg_head) if seg_head is not None else None
 
+    def forward(self, return_loss=True, **kwargs):
+        if return_loss:
+            return self.forward_train(**kwargs)
+        return self.forward_test(**kwargs)
+
+    def forward_train(self, *args, **kwargs):
+        pass
+
 
     @auto_fp16()
     def forward_test(
