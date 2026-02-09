@@ -5,6 +5,10 @@ from typing import Dict
 from mmcv.runner import auto_fp16
 from .uniad_e2e import match_bbox
 
+#referencing OpenDriveVLA/projects/mmdet3d_plugin/uniad/detectors/uniad_track.py for track logic
+#referencing OpenDriveVLA/projects/mmdet3d_plugin/uniad/dense_heads/panseg_head.py for map seg logic
+#referencing OpenDriveVLA/projects/mmdet3d_plugin/uniad/detectors/uniad_e2e.py for multi-task training logic and loss weighting
+
 @DETECTORS.register_module()
 class Track_Map_Former(UniADTrack):
     """
@@ -72,6 +76,91 @@ class Track_Map_Former(UniADTrack):
         loss_dict = {f"{prefix}.{k}" : v*loss_factor for k, v in loss_dict.items()}
         return loss_dict
 
+    def _forward_single_frame_track_inference(
+        self,
+        bev_embed,
+        img_metas,
+        track_instances,
+        l2g_r1=None,
+        l2g_t1=None,
+        l2g_r2=None,
+        l2g_t2=None,
+        time_delta=None,
+    ): 
+        active_inst = track_instances[track_instances.obj_idxes >= 0]
+        other_inst = track_instances[track_instances.obj_idxes < 0]
+
+        if l2g_r2 is not None and len(active_inst) > 0 and l2g_r1 is not None:
+            ref_pts = active_inst.ref_pts
+            velo = active_inst.pred_boxes[:, -2:]
+            ref_pts = self.velo_update(
+                ref_pts, velo, l2g_r1, l2g_t1, l2g_r2, l2g_t2, time_delta=time_delta
+            )
+            ref_pts = ref_pts.squeeze(0)
+            dim = active_inst.query.shape[-1]
+            active_inst.ref_pts = self.reference_points(active_inst.query[..., :dim//2])
+            active_inst.ref_pts[...,:2] = ref_pts[...,:2]
+
+        track_instances = Instances.cat([other_inst, active_inst])
+
+        # NOTE: You can replace BEVFormer with other BEV encoder and provide bev_embed here
+        #bev_embed, bev_pos, img_feat_2D = self.get_bevs(img, img_metas, prev_bev=prev_bev)
+        #getting bev_embed directly from bevfusion now
+        det_output = self.pts_bbox_head.get_detections(
+            bev_embed, 
+            object_query_embeds=track_instances.query,
+            ref_points=track_instances.ref_pts,
+            img_metas=img_metas,
+        )
+        output_classes = det_output["all_cls_scores"]
+        output_coords = det_output["all_bbox_preds"]
+        last_ref_pts = det_output["last_ref_points"]
+        query_feats = det_output["query_feats"]
+
+        out = {
+            "pred_logits": output_classes,
+            "pred_boxes": output_coords,
+            "ref_pts": last_ref_pts,
+            #"bev_embed": bev_embed, bev_embed already available directly
+            "query_embeddings": query_feats,
+            "all_past_traj_preds": det_output["all_past_traj_preds"],
+            #"bev_pos": bev_pos, only used in motion former, not needed
+        }
+
+        """ update track instances with predict results """
+        track_scores = output_classes[-1, 0, :].sigmoid().max(dim=-1).values
+        # each track will be assigned an unique global id by the track base.
+        track_instances.scores = track_scores
+        # track_instances.track_scores = track_scores  # [300]
+        track_instances.pred_logits = output_classes[-1, 0]  # [300, num_cls]
+        track_instances.pred_boxes = output_coords[-1, 0]  # [300, box_dim]
+        track_instances.output_embedding = query_feats[-1][0]  # [300, feat_dim]
+        track_instances.ref_pts = last_ref_pts[0]
+        # hard_code: assume the 901 query is sdc query 
+        track_instances.obj_idxes[900] = -2
+        """ update track base """
+        self.track_base.update(track_instances, None)
+       
+        active_index = (track_instances.obj_idxes>=0) & (track_instances.scores >= self.track_base.filter_score_thresh)    # filter out sleep objects
+        out.update(self.select_active_track_query(track_instances, active_index, img_metas))
+        out.update(self.select_sdc_track_query(track_instances[track_instances.obj_idxes==-2], img_metas))
+
+        """ update with memory_bank """
+        if self.memory_bank is not None:
+            track_instances = self.memory_bank(track_instances)
+
+        """  Update track instances using matcher """
+        tmp = {}
+        tmp["init_track_instances"] = self._generate_empty_tracks()
+        tmp["track_instances"] = track_instances
+        out_track_instances = self.query_interact(tmp)
+        out["track_instances_fordet"] = track_instances
+        out["track_instances"] = out_track_instances
+        out["track_obj_idxes"] = track_instances.obj_idxes
+        #out["img_feat_2D"] = img_feat_2D no longer needed by map seg former
+        return out
+
+
     @auto_fp16()
     def forward_test(
         self,
@@ -109,51 +198,61 @@ class Track_Map_Former(UniADTrack):
 
         assert bev_hwbc.shape[0] == self.pts_bbox_head.bev_h * self.pts_bbox_head.bev_w
 
-        track_instances = self._generate_empty_tracks()
+         """ init track instances for first frame """
+        if (
+            self.test_track_instances is None
+            or img_metas[0]["scene_token"] != self.scene_token
+        ):
+            self.timestamp = timestamp
+            self.scene_token = img_metas[0]["scene_token"]
+            #self.prev_bev = None
+            track_instances = self._generate_empty_tracks()
+            time_delta, l2g_r1, l2g_t1, l2g_r2, l2g_t2 = None, None, None, None, None
+            
+        else:
+            track_instances = self.test_track_instances
+            time_delta = timestamp - self.timestamp
+            l2g_r1 = self.l2g_r_mat
+            l2g_t1 = self.l2g_t
+            l2g_r2 = l2g_r_mat
+            l2g_t2 = l2g_t
+        
+        """ get time_delta and l2g r/t infos """
+        """ update frame info for next frame"""
+        self.timestamp = timestamp
+        self.l2g_t = l2g_t
+        self.l2g_r_mat = l2g_r_mat
 
-        det_output = self.pts_bbox_head.get_detections(
-            bev_hwbc,
-            object_query_embeds=track_instances.query,
-            ref_points=track_instances.ref_pts,
-            img_metas=img_metas,
+        """ predict and update """
+        #prev_bev = self.prev_bev
+        frame_res = self._forward_single_frame_track_inference(
+            bev_embed,
+            img_metas,
+            track_instances,
+            #prev_bev,
+            l2g_r1,
+            l2g_t1,
+            l2g_r2,
+            l2g_t2,
+            time_delta,
         )
 
-        output_classes = det_output["all_cls_scores"]
-        output_coords = det_output["all_bbox_preds"]
-        query_feats = det_output["query_feats"]
-        last_ref_pts = det_output["last_ref_points"]
+        #self.prev_bev = frame_res["bev_embed"]
+        track_instances = frame_res["track_instances"]
+        track_instances_fordet = frame_res["track_instances_fordet"]
 
-        track_instances.pred_logits = output_classes[-1, 0]
-        track_instances.pred_boxes = output_coords[-1, 0]
-        track_instances.output_embedding = query_feats[-1][0]
-        track_instances.ref_pts = last_ref_pts[0]
-
-        with torch.no_grad():
-            track_instances.scores = track_instances.pred_logits.sigmoid().max(dim=-1).values
-
-        sdc_idx = getattr(self, "num_query", None)
-        if sdc_idx is None:
-            sdc_idx = track_instances.obj_idxes.numel() - 1
-        track_instances.obj_idxes[sdc_idx] = -2
-
-        if hasattr(self, "track_base") and self.track_base is not None:
-            self.track_base.update(track_instances, None)
-            filter_thresh = self.track_base.filter_score_thresh
-        else:
-            filter_thresh = 0.0
-
-        active_index = (track_instances.obj_idxes >= 0) & (track_instances.scores >= filter_thresh)
-
-        result_track = self.select_active_track_query(track_instances, active_index, img_metas)
-        result_track["img_feat_2D"] = img_feat_2D
-        result_track["track_instances_fordet"] = track_instances
-
-        if hasattr(self, "select_sdc_track_query"):
-            try:
-                result_track.update(self.select_sdc_track_query(track_instances[sdc_idx], img_metas))
-            except Exception:
-                pass
-
+        self.test_track_instances = track_instances
+        result_track = [dict()]
+        get_keys = ["bev_embed", "bev_pos", 
+                    "track_query_embeddings", "track_bbox_results", 
+                    "boxes_3d", "scores_3d", "labels_3d", "track_scores", "track_ids"]
+        #get_keys += ["img_feat_2D"]
+        get_keys += ["track_instances_fordet"]
+        get_keys += ["sdc_boxes_3d", "sdc_scores_3d", "sdc_track_scores", "sdc_track_bbox_results"]
+        if self.with_motion_head:
+            get_keys += ["sdc_embedding"]
+        result_track[0].update({k: frame_res[k] for k in get_keys})
+        result_track = self._det_instances2results(track_instances_fordet, result_track, img_metas)
 
         if gt_bboxes_3d is not None and gt_inds is not None:
             detected_boxes3d = result_track["track_bbox_results"][0][0].tensor  # LiDARInstance3DBoxes.tensor
