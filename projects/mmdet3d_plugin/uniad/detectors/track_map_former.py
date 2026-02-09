@@ -15,6 +15,13 @@ class Track_Map_Former(UniADTrack):
     def __init__(
         self,
         seg_head=None,
+        task_loss_weight=dict(
+            track=1.0,
+            map=1.0,
+            motion=1.0,
+            occ=1.0,
+            planning=1.0
+        ),
         *args,
         **kwargs
     ):
@@ -22,14 +29,48 @@ class Track_Map_Former(UniADTrack):
 
         self.seg_head = build_head(seg_head) if seg_head is not None else None
 
+        self.task_loss_weight = task_loss_weight
+
     def forward(self, return_loss=True, **kwargs):
         if return_loss:
             return self.forward_train(**kwargs)
         return self.forward_test(**kwargs)
+    
+    @auto_fp16(apply_to=('img', 'points'))
+    def forward_train(
+        self,
+        bev_embed=None,
+        img_feat_2D=None,
+        img_metas=None,
+        timestamp=None,
+        l2g_r_mat=None,
+        l2g_t=None,
+        gt_lane_labels=None,
+        gt_lane_bboxes=None,
+        gt_lane_masks=None,
+        rescale=False,
+        gt_bboxes_3d=None,
+        gt_labels_3d=None,
+        gt_inds=None,
+        **kwargs):
+        
+        losses = dict()
+        if self.with_seg_head:          
+            losses_seg, outs_seg = self.seg_head.forward_train(bev_embed, img_metas,
+                                                          gt_lane_labels, gt_lane_bboxes, gt_lane_masks)
+            
+            losses_seg = self.loss_weighted_and_prefixed(losses_seg, prefix='map')
+            losses.update(losses_seg)
+        
 
-    def forward_train(self, *args, **kwargs):
-        pass
 
+        # results_for_vlm = self.get_results_for_vlm(img_metas[0], outs_track, outs_seg[0], sdc_planning[0], sdc_planning_mask[0], command[0], in_uniad_train=True, **kwargs)
+        return losses #, results_for_vlm
+
+    def loss_weighted_and_prefixed(self, loss_dict, prefix=''):
+        loss_factor = self.task_loss_weight[prefix]
+        loss_dict = {f"{prefix}.{k}" : v*loss_factor for k, v in loss_dict.items()}
+        return loss_dict
 
     @auto_fp16()
     def forward_test(
