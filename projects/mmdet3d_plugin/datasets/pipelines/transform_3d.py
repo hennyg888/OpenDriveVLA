@@ -798,9 +798,10 @@ class GridMask:
     
 @PIPELINES.register_module()
 class ImageNormalize:
-    def __init__(self, mean, std):
+    def __init__(self, mean, std, to_tensor=True):
         self.mean = mean
         self.std = std
+        self.to_tensor = to_tensor
         self.compose = torchvision.transforms.Compose(
             [
                 torchvision.transforms.ToTensor(),
@@ -809,7 +810,11 @@ class ImageNormalize:
         )
 
     def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        data["img"] = [self.compose(img) for img in data["img"]]
+        imgs = [self.compose(img) for img in data["img"]]
+        if self.to_tensor:
+            data["img"] = imgs
+        else:
+            data["img"] = [img.permute(1, 2, 0).cpu().numpy() for img in imgs]
         data["img_norm_cfg"] = dict(mean=self.mean, std=self.std)
         return data
     

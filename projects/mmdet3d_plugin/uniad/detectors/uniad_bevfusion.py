@@ -63,14 +63,21 @@ class UniADBevFusion(nn.Module):
         return self
 
     def _freeze_bevfusion(self):
-        for param in self.bevfusion.parameters():
-            param.requires_grad = False
         if self.freeze_bevfusion_bn:
             self.bevfusion.eval()
+        for param in self.bevfusion.parameters():
+            param.requires_grad = False
 
     def _resize_bev_feat(self, bev_feat):
         if bev_feat is None:
             return None
+        if bev_feat.dim() == 5:
+            # B, N, C, H, W -> B, C, HW
+            b, n, c, h, w = bev_feat.shape
+            bev_feat = bev_feat.view(b, n * c, h, w)
+            bev_feat = self._resize_bev_feat(bev_feat)
+            bev_feat = bev_feat.view(b, n, c, self.bev_out_hw, self.bev_out_hw)
+            return bev_feat
         if bev_feat.dim() == 4:
             # B, C, H, W -> B, C, HW
             b, c, h, w = bev_feat.shape
@@ -180,40 +187,83 @@ class UniADBevFusion(nn.Module):
         radar=None,
         gt_bboxes_3d=None,
         gt_labels_3d=None,
-        train_stage="finetune",
+        gt_inds=None,
+        l2g_t=None,
+        l2g_r_mat=None,
+        timestamp=None,
+        gt_lane_labels=None,
+        gt_lane_bboxes=None,
+        gt_lane_masks=None,
+        gt_fut_traj=None,
+        gt_fut_traj_mask=None,
+        gt_past_traj=None,
+        gt_past_traj_mask=None,
+        gt_sdc_bbox=None,
+        gt_sdc_label=None,
+        gt_sdc_fut_traj=None,
+        gt_sdc_fut_traj_mask=None,                  
+        #planning
+        sdc_planning=None,
+        sdc_planning_mask=None,
+        command=None,
         **kwargs,
     ):
-        bev_feat, img_feat_2d = self.extract_feat(
-            img=img,
-            points=points,
-            camera2ego=camera2ego,
-            lidar2ego=lidar2ego,
-            lidar2camera=lidar2camera,
-            lidar2image=lidar2image,
-            camera_intrinsics=camera_intrinsics,
-            camera2lidar=camera2lidar,
-            img_aug_matrix=img_aug_matrix,
-            lidar_aug_matrix=lidar_aug_matrix,
-            img_metas=img_metas,
-            depths=depths,
-            radar=radar,
-            gt_bboxes_3d=gt_bboxes_3d,
-            gt_labels_3d=gt_labels_3d,
-            **kwargs,
-        )
+        bev_feats = []
+        img_feat_2ds = []
+        for i in range(self.track_map_former.queue_length):
+            bev_feat, img_feat_2d = self.extract_feat(
+                img=img[i],
+                points=points[i],
+                camera2ego=camera2ego[i],
+                lidar2ego=lidar2ego[i],
+                lidar2camera=lidar2camera[i],
+                lidar2image=lidar2image[i],
+                camera_intrinsics=camera_intrinsics[i],
+                camera2lidar=camera2lidar[i],
+                img_aug_matrix=img_aug_matrix[i],
+                lidar_aug_matrix=lidar_aug_matrix[i],
+                img_metas=img_metas[i],
+                depths=depths[i],  
+                radar=radar[i],
+                gt_bboxes_3d=gt_bboxes_3d[i],
+                gt_labels_3d=gt_labels_3d[i],
+                **kwargs,
+            )
+            bev_feats.append(bev_feat)
+            img_feat_2ds.append(img_feat_2d)
+
+        bev_feat = torch.stack(bev_feats, dim=0)
+        img_feat_2d = torch.stack(img_feat_2ds, dim=0)
 
         if self.track_map_former is None:
             raise RuntimeError("track_map_former is required for forward_train.")
 
-        losses = self.track_map_former.forward_train(
+        losses = self.track_map_former.forward(
             bev_embed=bev_feat,
-            img_feat_2D=img_feat_2d,
             img_metas=img_metas,
             gt_bboxes_3d=gt_bboxes_3d,
             gt_labels_3d=gt_labels_3d,
+            gt_inds=gt_inds,
+            l2g_t=l2g_t,
+            l2g_r_mat=l2g_r_mat,
+            timestamp=timestamp,
+            gt_lane_labels=gt_lane_labels,
+            gt_lane_bboxes=gt_lane_bboxes,
+            gt_lane_masks=gt_lane_masks,
+            gt_fut_traj=gt_fut_traj,
+            gt_fut_traj_mask=gt_fut_traj_mask,
+            gt_past_traj=gt_past_traj,
+            gt_past_traj_mask=gt_past_traj_mask,
+            gt_sdc_bbox=gt_sdc_bbox,
+            gt_sdc_label=gt_sdc_label,
+            gt_sdc_fut_traj=gt_sdc_fut_traj,
+            gt_sdc_fut_traj_mask=gt_sdc_fut_traj_mask,
+            sdc_planning=sdc_planning,
+            sdc_planning_mask=sdc_planning_mask,
+            command=command,
             **kwargs,
         )
-        return losses or {}
+        return losses
 
     @auto_fp16(apply_to=("img", "points"))
     def forward_test(

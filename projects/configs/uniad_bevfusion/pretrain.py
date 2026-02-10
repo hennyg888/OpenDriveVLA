@@ -1,8 +1,14 @@
-_base_ = ["../bevfusion_track_map/bevfusion.py"]
+_base_ = ["../_base_/datasets/nus-3d.py",
+          "../_base_/default_runtime.py"]
+        
+queue_length = 5
+file_client_args = dict(backend="disk")
 
-# BEVFormer track/map head settings (from bevfusion_track_map/track_map_former.py)
-point_cloud_range_track = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
-voxel_size_track = [0.2, 0.2, 8]
+bevfusion_point_cloud_range = [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
+bevfusion_voxel_size = [0.075, 0.075, 0.2]
+point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
+voxel_size = [0.2, 0.2, 8]
+patch_size = [102.4, 102.4]
 _dim_ = 256
 _pos_dim_ = _dim_ // 2
 _ffn_dim_ = _dim_ * 2
@@ -12,14 +18,93 @@ bev_w_ = 200
 _feed_dim_ = _ffn_dim_
 _dim_half_ = _pos_dim_
 canvas_size = (bev_h_, bev_w_)
-queue_length = 5
 past_steps = 4
 fut_steps = 4
+image_size = [256, 704]
+
+seed = 0
+deterministic = False
+total_epochs = 20
+max_epochs = 6
+
+dataset_type = "NuScenesE2EDataset"
+data_root = "data/nuscenes/"
+info_root = "data/infos/"
+ann_file_train=info_root + f"nuscenes_infos_temporal_train.pkl"
+ann_file_val=info_root + f"nuscenes_infos_temporal_val.pkl"
+
+plugin = True
+plugin_dir = "projects/mmdet3d_plugin/"
+
+gt_paste_stop_epoch = -1
+reduce_beams = 32
+load_dim = 5
+use_dim = 5
+load_augmented = None
+class_names = [
+    "car",
+    "truck",
+    "construction_vehicle",
+    "bus",
+    "trailer",
+    "barrier",
+    "motorcycle",
+    "bicycle",
+    "pedestrian",
+    "traffic_cone",
+]
+occflow_grid_conf = {
+    'xbound': [-50.0, 50.0, 0.5],
+    'ybound': [-50.0, 50.0, 0.5],
+    'zbound': [-10.0, 10.0, 20.0],
+}
+
+image_size = [256, 704]
+
+augment2d = dict(
+    resize=[[0.38, 0.55], [0.48, 0.48]],
+    rotate=[-5.4, 5.4],
+    gridmask=dict(
+        prob=0.0,
+        fixed_prob=True,
+    )
+)
+
+augment3d = dict(
+    scale=[0.9, 1.1],
+    rotate=[-0.78539816, 0.78539816],
+    translate=0.5,
+)
+
+
+object_classes = [
+    'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
+    'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
+]
+
+map_classes = ['drivable_area', 'ped_crossing', 'walkway', 'stop_line', 'carpark_area', 'divider']
+
+input_modality = dict(
+    use_lidar=True, use_camera=True, use_radar=False, use_map=False, use_external=False
+)
+
+planning_evaluation_strategy = "uniad"
+### traj prediction args ###
+predict_steps = 12
+predict_modes = 6
+fut_steps = 4
+past_steps = 4
+use_nonlinear_optimizer = True
+
+## occflow setting	
+occ_n_future = 4	
+occ_n_future_plan = 6
+occ_n_future_max = max([occ_n_future, occ_n_future_plan])	
 
 model = dict(
     type="UniADBevFusion",
     freeze_bevfusion=True,
-    freeze_bevfusion_bn=False,
+    freeze_bevfusion_bn=True,
     bev_in_hw=180,
     bev_out_hw=200,
     bevfusion=dict(
@@ -73,8 +158,8 @@ model = dict(
             lidar=dict(
                 voxelize=dict(
                     max_num_points=10,
-                    point_cloud_range=point_cloud_range,
-                    voxel_size=voxel_size,
+                    point_cloud_range=bevfusion_point_cloud_range,
+                    voxel_size=bevfusion_voxel_size,
                     max_voxels=(120000, 160000),
                 ),
                 backbone=dict(
@@ -109,29 +194,10 @@ model = dict(
         video_test_mode=True,
         num_query=900,
         num_classes=10,
-        pc_range=point_cloud_range_track,
-        img_backbone=dict(
-            type="ResNet",
-            depth=101,
-            num_stages=4,
-            out_indices=(1, 2, 3),
-            frozen_stages=4,
-            norm_cfg=dict(type="BN2d", requires_grad=False),
-            norm_eval=True,
-            style="caffe",
-            dcn=dict(type="DCNv2", deform_groups=1, fallback_on_stride=False),
-            stage_with_dcn=(False, False, True, True),
-        ),
-        img_neck=dict(
-            type="FPN",
-            in_channels=[512, 1024, 2048],
-            out_channels=_dim_,
-            start_level=0,
-            add_extra_convs="on_output",
-            num_outs=4,
-            relu_before_extra_convs=True,
-        ),
-        freeze_img_backbone=True,
+        pc_range=point_cloud_range,
+        img_backbone=None,
+        img_neck=None,
+        freeze_img_backbone=False,
         freeze_img_neck=False,
         freeze_bn=False,
         score_thresh=0.4,
@@ -157,7 +223,7 @@ model = dict(
                 type="HungarianAssigner3DTrack",
                 cls_cost=dict(type="FocalLossCost", weight=2.0),
                 reg_cost=dict(type="BBox3DL1Cost", weight=0.25),
-                pc_range=point_cloud_range_track,
+                pc_range=point_cloud_range,
             ),
             loss_cls=dict(
                 type="FocalLoss",
@@ -190,7 +256,7 @@ model = dict(
                 encoder=dict(
                     type="BEVFormerEncoder",
                     num_layers=6,
-                    pc_range=point_cloud_range_track,
+                    pc_range=point_cloud_range,
                     num_points_in_pillar=4,
                     return_intermediate=False,
                     transformerlayers=dict(
@@ -199,7 +265,7 @@ model = dict(
                             dict(type="TemporalSelfAttention", embed_dims=_dim_, num_levels=1),
                             dict(
                                 type="SpatialCrossAttention",
-                                pc_range=point_cloud_range_track,
+                                pc_range=point_cloud_range,
                                 deformable_attention=dict(
                                     type="MSDeformableAttention3D",
                                     embed_dims=_dim_,
@@ -256,9 +322,9 @@ model = dict(
             bbox_coder=dict(
                 type="NMSFreeCoder",
                 post_center_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
-                pc_range=point_cloud_range_track,
+                pc_range=point_cloud_range,
                 max_num=300,
-                voxel_size=voxel_size_track,
+                voxel_size=voxel_size,
                 num_classes=10,
             ),
             positional_encoding=dict(
@@ -282,7 +348,7 @@ model = dict(
             bev_h=bev_h_,
             bev_w=bev_w_,
             canvas_size=canvas_size,
-            pc_range=point_cloud_range_track,
+            pc_range=point_cloud_range,
             num_query=300,
             num_classes=4,
             num_things_classes=3,
@@ -377,6 +443,255 @@ model = dict(
             ),
         ),
     ),
+    train_cfg=dict(
+        pts=dict(
+            grid_size=[512, 512, 1],
+            voxel_size=voxel_size,
+            point_cloud_range=point_cloud_range,
+            out_size_factor=4,
+            assigner=dict(
+                type="HungarianAssigner3D",
+                cls_cost=dict(type="FocalLossCost", weight=2.0),
+                reg_cost=dict(type="BBox3DL1Cost", weight=0.25),
+                iou_cost=dict(
+                    type="IoUCost", weight=0.0
+                ),  # Fake cost. This is just to make it compatible with DETR head.
+                pc_range=point_cloud_range,
+            ),
+        )
+    ),
+)
+
+train_pipeline = [
+    dict(type="LoadMultiViewImageFromFiles", to_float32=True),
+    dict(type="LoadPointsFromFile", coord_type="LIDAR", load_dim=load_dim, use_dim=use_dim),
+    dict(
+        type='LoadPointsFromMultiSweeps',
+        sweeps_num=9,
+        load_dim=load_dim,
+        use_dim=[0,1,2,3,4],
+        pad_empty_sweeps=True,
+        remove_close=True),
+    dict(type='LoadAnnotations3D_E2E', 
+        with_bbox_3d=True,
+        with_label_3d=True,
+        with_attr_label=False,
+
+        with_future_anns=True,  # occ_flow gt
+        with_ins_inds_3d=True,  # ins_inds 
+        ins_inds_add_1=True,    # ins_inds start from 1
+    ),
+    dict(
+        type="ImageAug3D",
+        final_dim=image_size,
+        resize_lim=augment2d['resize'][1],
+        bot_pct_lim=[0.0, 0.0],
+        rot_lim=augment2d['rotate'],
+        rand_flip=False,
+        is_train=False),
+    dict(
+        type="GlobalRotScaleTrans_3D",
+        resize_lim=[1.0, 1.0],
+        rot_lim=[0.0, 0.0],
+        trans_lim=0.0,
+        is_train=False),
+    dict(
+        type="ImageNormalize",
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225],
+        to_tensor=False),
+    dict(
+    type='GenerateOccFlowLabels',
+    grid_conf=occflow_grid_conf,
+    ignore_index=255,
+    only_vehicle=True,
+    filter_invisible=False),
+    dict(type="ObjectRangeFilterTrack", point_cloud_range=point_cloud_range),
+    dict(type="ObjectNameFilterTrack", classes=class_names),
+    dict(type="DefaultFormatBundle3D", class_names=class_names),
+    dict(type="PointsToTensor"),
+    dict(type="CustomCollect3D",
+        keys=["img", 
+              "points",
+              "timestamp",
+              "l2g_r_mat",
+              "l2g_t",
+              "gt_lane_labels",
+              "gt_lane_bboxes",
+              "gt_lane_masks",
+              "gt_segmentation",
+              "gt_inds",
+              "gt_bboxes_3d",
+              "gt_labels_3d",
+              "gt_fut_traj",
+              "gt_fut_traj_mask",
+              "gt_past_traj",
+              "gt_past_traj_mask",
+              "gt_sdc_bbox",
+              "gt_sdc_label",
+              "gt_sdc_fut_traj",
+              "gt_sdc_fut_traj_mask",
+              # Occ gt
+              "gt_instance", 
+              "gt_centerness", 
+              "gt_offset", 
+              "gt_flow",
+              "gt_backward_flow",
+              "gt_occ_has_invalid_frame",
+              "gt_occ_img_is_valid",
+              # gt future bbox for plan	
+              "gt_future_boxes",	
+              "gt_future_labels",	
+              # planning	
+              "sdc_planning",	
+              "sdc_planning_mask",	
+              "command"],
+        meta_keys=(
+            "camera2ego",
+            "lidar2ego",
+            "lidar2camera",
+            "lidar2image",
+            "camera_intrinsics",
+            "camera2lidar",
+            "img_aug_matrix",
+            "lidar_aug_matrix")
+    ),
+]
+
+test_pipeline = [
+    dict(type="LoadMultiViewImageFromFiles", to_float32=True),
+    dict(type="LoadPointsFromFile", coord_type="LIDAR", load_dim=load_dim, use_dim=use_dim),
+    dict(
+        type='LoadPointsFromMultiSweeps',
+        sweeps_num=9,
+        load_dim=load_dim,
+        use_dim=[0,1,2,3,4],
+        pad_empty_sweeps=True,
+        remove_close=True),
+    dict(type='LoadAnnotations3D_E2E', 
+         with_bbox_3d=False,
+         with_label_3d=False, 
+         with_attr_label=False,
+
+         with_future_anns=True,
+         with_ins_inds_3d=False,
+         ins_inds_add_1=True, # ins_inds start from 1
+    ),
+    dict(
+        type="ImageAug3D",
+        final_dim=image_size,
+        resize_lim=augment2d['resize'][1],
+        bot_pct_lim=[0.0, 0.0],
+        rot_lim=augment2d['rotate'],
+        rand_flip=False,
+        is_train=False),
+    dict(
+        type="GlobalRotScaleTrans_3D",
+        resize_lim=[1.0, 1.0],
+        rot_lim=[0.0, 0.0],
+        trans_lim=0.0,
+        is_train=False),
+    dict(
+        type="ImageNormalize",
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225],
+        to_tensor=True),
+    dict(
+    type='GenerateOccFlowLabels',
+    grid_conf=occflow_grid_conf,
+    ignore_index=255,
+    only_vehicle=True,
+    filter_invisible=False),
+    dict(type="PointsToTensor"),
+    dict(
+        type="CustomCollect3D",
+        keys=["img", 
+              "points",
+              "timestamp",
+              "l2g_r_mat",
+              "l2g_t",
+              "gt_lane_labels",
+              "gt_lane_bboxes",
+              "gt_lane_masks",
+              "gt_segmentation"],
+        meta_keys=(
+            "camera2ego",
+            "lidar2ego",
+            "lidar2camera",
+            "lidar2image",
+            "camera_intrinsics",
+            "camera2lidar",
+            "img_aug_matrix",
+            "lidar_aug_matrix",
+        )),
+]
+
+data = dict(
+    samples_per_gpu=1,
+    workers_per_gpu=8,
+    train=dict(
+        type=dataset_type,
+        file_client_args=file_client_args,
+        data_root=data_root,
+        ann_file=ann_file_train,
+        pipeline=train_pipeline,
+        classes=class_names,
+        modality=input_modality,
+        test_mode=False,
+        use_valid_flag=True,
+        patch_size=patch_size,
+        canvas_size=canvas_size,
+        bev_size=(bev_h_, bev_w_),
+        queue_length=queue_length,
+        predict_steps=predict_steps,
+        past_steps=past_steps,
+        fut_steps=fut_steps,
+        use_nonlinear_optimizer=use_nonlinear_optimizer,
+
+        occ_receptive_field=3,
+        occ_n_future=occ_n_future_max,
+        occ_filter_invalid_sample=False,
+
+        # we use box_type_3d='LiDAR' in kitti and nuscenes dataset
+        # and box_type_3d='Depth' in sunrgbd and scannet dataset.
+        box_type_3d="LiDAR",
+    ),
+    val=dict(
+        type=dataset_type,
+        file_client_args=file_client_args,
+        data_root=data_root,
+        ann_file=ann_file_val,
+        pipeline=test_pipeline,
+        patch_size=patch_size,
+        canvas_size=canvas_size,
+        bev_size=(bev_h_, bev_w_),
+        predict_steps=predict_steps,
+        past_steps=past_steps,
+        fut_steps=fut_steps,
+        use_nonlinear_optimizer=use_nonlinear_optimizer,
+        classes=class_names,
+        modality=input_modality,
+        samples_per_gpu=1,
+        eval_mod=['det', 'track', 'map'],
+
+        occ_receptive_field=3,
+        occ_n_future=occ_n_future_max,
+        occ_filter_invalid_sample=False,
+    ),
+
+    test=dict(
+        type=dataset_type,
+        data_root=data_root,
+        ann_file=data_root + "nuscenes_infos_temporal_val.pkl",
+        pipeline=test_pipeline,
+        classes=object_classes,
+        modality=input_modality,
+        test_mode=True,
+        box_type_3d="LiDAR",
+        eval_mod=['map', 'track'],
+    ),
+    shuffler_sampler=dict(type="DistributedGroupSampler"),
+    nonshuffler_sampler=dict(type="DistributedSampler"),
 )
 
 optimizer = dict(
@@ -385,6 +700,7 @@ optimizer = dict(
     paramwise_cfg=dict(custom_keys={"img_backbone": dict(lr_mult=0.1)}),
     weight_decay=0.01,
 )
+
 optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 lr_config = dict(
     policy="CosineAnnealing",
@@ -404,5 +720,6 @@ log_config = dict(
     interval=10, hooks=[dict(type="TextLoggerHook"), dict(type="TensorboardLoggerHook")]
 )
 checkpoint_config = dict(interval=1)
-load_from = "ckpts/bevformer_r101_dcn_24ep.pth"
+load_from = None
+resume_from = None
 find_unused_parameters = True
