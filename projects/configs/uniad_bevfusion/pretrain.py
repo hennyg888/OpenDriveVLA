@@ -547,6 +547,31 @@ train_pipeline = [
               "sdc_planning_mask",	
               "command"],
         meta_keys=(
+            # default meta keys (keep existing ones)
+            "filename",
+            "ori_shape",
+            "img_shape",
+            "lidar2img",
+            "depth2img",
+            "cam2img",
+            "pad_shape",
+            "scale_factor",
+            "flip",
+            "pcd_horizontal_flip",
+            "pcd_vertical_flip",
+            "box_mode_3d",
+            "box_type_3d",
+            "img_norm_cfg",
+            "pcd_trans",
+            "sample_idx",
+            "prev_idx",
+            "next_idx",
+            "pcd_scale_factor",
+            "pcd_rotation",
+            "pts_filename",
+            "transformation_3d_flow",
+            "scene_token",
+            "can_bus",
             "camera2ego",
             "lidar2ego",
             "lidar2camera",
@@ -700,7 +725,6 @@ optimizer = dict(
     paramwise_cfg=dict(custom_keys={"img_backbone": dict(lr_mult=0.1)}),
     weight_decay=0.01,
 )
-
 optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 lr_config = dict(
     policy="CosineAnnealing",

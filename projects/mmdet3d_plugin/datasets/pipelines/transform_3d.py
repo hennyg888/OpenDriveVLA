@@ -974,6 +974,9 @@ class ImageAug3D:
 class PointsToTensor:
     def __call__(self, results):
         if "points" in results:
+            points = results["points"]
+            if isinstance(points, DC):
+                points = points.data
             # LiDARPoints → torch.Tensor
-            results["points"] = results["points"].tensor
+            results["points"] = points.tensor if hasattr(points, "tensor") else points
         return results

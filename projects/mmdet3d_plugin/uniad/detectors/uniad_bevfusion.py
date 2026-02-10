@@ -1,4 +1,6 @@
 import torch
+from collections import OrderedDict
+import torch.distributed as dist
 from torch import nn
 from mmcv.runner import auto_fp16
 from mmdet.models import DETECTORS
@@ -52,6 +54,10 @@ class UniADBevFusion(nn.Module):
             self.bevfusion.init_weights()
         if hasattr(self.track_map_former, "init_weights"):
             self.track_map_former.init_weights()
+        
+        # Convert track_map_former to FP16 to save memory (BEVFusion stays in FP32)
+        if self.track_map_former is not None:
+            self.track_map_former.half()
 
     def train(self, mode=True):
         super().train(mode)
@@ -96,6 +102,62 @@ class UniADBevFusion(nn.Module):
             return bev_flat.view(b, c, self.bev_out_hw, self.bev_out_hw)
         raise ValueError(f"Unsupported bev_feat shape: {bev_feat.shape}")
 
+    def _extract_calib_from_metas(self, img_metas):
+        """
+        Extract camera2ego / lidar2ego / lidar2camera / lidar2image /
+        camera_intrinsics / camera2lidar / img_aug_matrix / lidar_aug_matrix
+        from img_metas.
+
+        Supports:
+        - Training (NuScenesE2EDataset + union2one): img_metas[0] is a
+          dict indexed by frame idx: {0: meta_0, 1: meta_1, ...}
+        - Single-frame test: img_metas[0] is a meta dict.
+        """
+        assert img_metas is not None, "img_metas is required to extract calibration."
+
+        # bs=1 is assumed in UniAD / Track_Map_Former
+        if isinstance(img_metas, (list, tuple)):
+            assert len(img_metas) == 1, "Only batch size = 1 is supported here."
+            metas = img_metas[0]
+        else:
+            metas = img_metas
+
+        # Multi-frame case: metas is a dict indexed by frame idx
+        if isinstance(metas, dict) and 0 in metas:
+            num_frames = self.track_map_former.queue_length
+            frames = [metas[i] for i in range(num_frames)]
+
+            camera2ego = [f["camera2ego"] for f in frames]
+            lidar2ego = [f["lidar2ego"] for f in frames]
+            lidar2camera = [f["lidar2camera"] for f in frames]
+            lidar2image = [f["lidar2image"] for f in frames]
+            camera_intrinsics = [f["camera_intrinsics"] for f in frames]
+            camera2lidar = [f["camera2lidar"] for f in frames]
+            img_aug_matrix = [f["img_aug_matrix"] for f in frames]
+            lidar_aug_matrix = [f["lidar_aug_matrix"] for f in frames]
+        else:
+            # Single-frame meta dict
+            f = metas
+            camera2ego = f["camera2ego"]
+            lidar2ego = f["lidar2ego"]
+            lidar2camera = f["lidar2camera"]
+            lidar2image = f["lidar2image"]
+            camera_intrinsics = f["camera_intrinsics"]
+            camera2lidar = f["camera2lidar"]
+            img_aug_matrix = f["img_aug_matrix"]
+            lidar_aug_matrix = f["lidar_aug_matrix"]
+
+        return dict(
+            camera2ego=camera2ego,
+            lidar2ego=lidar2ego,
+            lidar2camera=lidar2camera,
+            lidar2image=lidar2image,
+            camera_intrinsics=camera_intrinsics,
+            camera2lidar=camera2lidar,
+            img_aug_matrix=img_aug_matrix,
+            lidar_aug_matrix=lidar_aug_matrix,
+        )
+
     def extract_feat(
         self,
         img=None,
@@ -118,6 +180,48 @@ class UniADBevFusion(nn.Module):
     ):
         if self.bevfusion is None:
             raise RuntimeError("bevfusion is required for feature extraction.")
+
+        # Normalize calibration parameters to BEVFusion expected format:
+        # Per-camera params: list of N_cam tensors [tensor0, tensor1, ..., tensorN]
+        # Single params: just a tensor (NOT a list)
+        
+        device = img.device if img is not None else 'cuda'
+        
+        def to_list_of_tensors(param):
+            """
+            Convert list of N_cam arrays to list of N_cam tensors
+            """
+            if param is None:
+                return None
+            if isinstance(param, list):
+                return [torch.as_tensor(x, device=device) if not torch.is_tensor(x) else x.to(device) 
+                       for x in param]
+            if isinstance(param, torch.Tensor):
+                # Already a stacked tensor [N_cam, ...], split into list
+                return [param[i].to(device) for i in range(param.shape[0])]
+            return param
+        
+        def to_tensor(param):
+            """
+            Convert single array/tensor to tensor (NOT a list)
+            """
+            if param is None:
+                return None
+            if not torch.is_tensor(param):
+                return torch.as_tensor(param, device=device)
+            return param.to(device)
+        
+        # Per-camera parameters: list of N_cam tensors, _to_BN44 will handle conversion
+        camera2ego = to_list_of_tensors(camera2ego)
+        lidar2camera = to_list_of_tensors(lidar2camera)
+        lidar2image = to_list_of_tensors(lidar2image)
+        camera_intrinsics = to_list_of_tensors(camera_intrinsics)
+        camera2lidar = to_list_of_tensors(camera2lidar)
+        img_aug_matrix = to_list_of_tensors(img_aug_matrix)
+        
+        # Single parameters: just single tensors, _to_BN44 will handle conversion to [B, 4, 4]
+        lidar2ego = to_tensor(lidar2ego)
+        lidar_aug_matrix = to_tensor(lidar_aug_matrix)
 
         if self.freeze_bevfusion:
             with torch.no_grad():
@@ -165,6 +269,16 @@ class UniADBevFusion(nn.Module):
         return bev_feat, img_feat_2d
 
     def forward(self, return_loss=True, **kwargs):
+        # Unpack calibration matrices from img_metas if not explicitly provided
+        img_metas = kwargs.get("img_metas", None)
+        needs_calib = (
+            "camera2ego" not in kwargs
+            or kwargs["camera2ego"] is None
+        )
+        if img_metas is not None and needs_calib and self.bevfusion is not None:
+            calib = self._extract_calib_from_metas(img_metas)
+            kwargs.update(calib)
+
         if return_loss:
             return self.forward_train(**kwargs)
         return self.forward_test(**kwargs)
@@ -208,12 +322,79 @@ class UniADBevFusion(nn.Module):
         command=None,
         **kwargs,
     ):
+        # Unwrap nested data structures from [[item0, item1, ...]] to [item0, item1, ...]
+        # Many parameters come as [[frames...]] due to DataContainer collation
+        def unwrap_if_nested(param, expected_len):
+            if param is not None and isinstance(param, (list, tuple)):
+                if len(param) == 1 and isinstance(param[0], (list, tuple)) and len(param[0]) == expected_len:
+                    return param[0]
+            return param
+        
+        queue_len = self.track_map_former.queue_length
+        
+        # Unwrap for loop indexing, but keep originals for track_map_former
+        points_unwrapped = unwrap_if_nested(points, queue_len)
+        gt_bboxes_3d_unwrapped = unwrap_if_nested(gt_bboxes_3d, queue_len)
+        gt_labels_3d_unwrapped = unwrap_if_nested(gt_labels_3d, queue_len)
+        gt_inds_unwrapped = unwrap_if_nested(gt_inds, queue_len)
+        
         bev_feats = []
         img_feat_2ds = []
-        for i in range(self.track_map_former.queue_length):
+        
+        # Extract metas_map for multi-frame indexing
+        # img_metas is typically [metas_map] where metas_map = {0: meta0, 1: meta1, ...}
+        if isinstance(img_metas, (list, tuple)) and len(img_metas) > 0:
+            metas_map = img_metas[0]
+            if isinstance(metas_map, dict) and 0 in metas_map:
+                # Multi-frame case
+                use_frame_dict = True
+            else:
+                # Single frame case or already frame meta
+                use_frame_dict = False
+        else:
+            metas_map = img_metas
+            use_frame_dict = False
+        
+        for i in range(queue_len):
+            # Slice along queue_length dimension, keep batch dimension
+            # img: [batch_size, queue_length, N_cam, C, H, W] -> img[:, i] -> [batch_size, N_cam, C, H, W]
+            # points: use unwrapped version for indexing
+            cur_img = img[:, i] if img is not None else None
+            if points_unwrapped is not None:
+                frame_points = points_unwrapped[i]
+                
+                # BEVFusion expects: list of batch_size point clouds (each a single tensor)
+                # After unwrapping, frame_points might be:
+                # 1. A single point cloud tensor -> wrap in list [tensor]
+                # 2. Still needs handling
+                
+                if isinstance(frame_points, (list, tuple)):
+                    # frame_points is a list, could be nested batch structure
+                    # Flatten to get the actual point cloud tensor
+                    while isinstance(frame_points, (list, tuple)) and len(frame_points) == 1:
+                        frame_points = frame_points[0]
+                    
+                    if torch.is_tensor(frame_points):
+                        # After unwrapping, got a tensor
+                        cur_points = [frame_points]
+                    else:
+                        # Shouldn't reach here, but handle gracefully
+                        cur_points = frame_points if isinstance(frame_points, (list, tuple)) else [frame_points]
+                else:
+                    # Single point cloud tensor
+                    cur_points = [frame_points]
+            else:
+                cur_points = None
+            
+            # Get frame i's img_metas and wrap in list for BEVFusion
+            if use_frame_dict:
+                cur_img_metas = [metas_map[i]]  # BEVFusion expects a list
+            else:
+                cur_img_metas = img_metas if i == 0 else None  # fallback
+            
             bev_feat, img_feat_2d = self.extract_feat(
-                img=img[i],
-                points=points[i],
+                img=cur_img,
+                points=cur_points,
                 camera2ego=camera2ego[i],
                 lidar2ego=lidar2ego[i],
                 lidar2camera=lidar2camera[i],
@@ -222,24 +403,41 @@ class UniADBevFusion(nn.Module):
                 camera2lidar=camera2lidar[i],
                 img_aug_matrix=img_aug_matrix[i],
                 lidar_aug_matrix=lidar_aug_matrix[i],
-                img_metas=img_metas[i],
-                depths=depths[i],  
-                radar=radar[i],
-                gt_bboxes_3d=gt_bboxes_3d[i],
-                gt_labels_3d=gt_labels_3d[i],
+                img_metas=cur_img_metas,
+                depths=depths[i] if depths is not None else None,
+                radar=radar[i] if radar is not None else None,
+                gt_bboxes_3d=gt_bboxes_3d_unwrapped[i] if gt_bboxes_3d_unwrapped is not None else None,
+                gt_labels_3d=gt_labels_3d_unwrapped[i] if gt_labels_3d_unwrapped is not None else None,
                 **kwargs,
             )
+            # extract_feat returns [1, C, H, W], remove batch dim for stacking
+            if bev_feat.dim() == 4 and bev_feat.shape[0] == 1:
+                bev_feat = bev_feat.squeeze(0)  # [C, H, W]
             bev_feats.append(bev_feat)
             img_feat_2ds.append(img_feat_2d)
 
+        # Stack: [queue_length, C, H, W]
         bev_feat = torch.stack(bev_feats, dim=0)
-        img_feat_2d = torch.stack(img_feat_2ds, dim=0)
+        
+        # Clear cache to free memory after BEVFusion forward (BEVFusion is freeze and detached)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        # Reshape for track_map_former: [queue_length, C, H, W] -> [queue_length, H*W, 1, C]
+        # The extra dimension is batch (=1), needed for transformer decoder
+        queue_length, C, H, W = bev_feat.shape
+        bev_embed = bev_feat.flatten(2).permute(0, 2, 1).unsqueeze(2).contiguous()  # [queue_length, H*W, 1, C]
+        
+        # Convert to FP16 for track_map_former (which is in FP16 mode)
+        bev_embed = bev_embed.half()
 
         if self.track_map_former is None:
             raise RuntimeError("track_map_former is required for forward_train.")
 
+        # Use original (non-unwrapped) parameters for track_map_former
+        # They already have the correct [[frames...]] format that track_map_former expects
         losses = self.track_map_former.forward(
-            bev_embed=bev_feat,
+            bev_embed=bev_embed,
             img_metas=img_metas,
             gt_bboxes_3d=gt_bboxes_3d,
             gt_labels_3d=gt_labels_3d,
@@ -312,6 +510,101 @@ class UniADBevFusion(nn.Module):
             **kwargs,
         )
 
+    def _parse_losses(self, losses):
+        """Parse the raw outputs (losses) of the network.
+
+        Args:
+            losses (dict): Raw output of the network, which usually contain
+                losses and other necessary information.
+
+        Returns:
+            tuple[Tensor, dict]: (loss, log_vars), loss is the loss tensor \
+                which may be a weighted sum of all losses, log_vars contains \
+                all the variables to be sent to the logger.
+        """
+        log_vars = OrderedDict()
+        for loss_name, loss_value in losses.items():
+            if isinstance(loss_value, torch.Tensor):
+                log_vars[loss_name] = loss_value.mean()
+            elif isinstance(loss_value, list):
+                log_vars[loss_name] = sum(_loss.mean() for _loss in loss_value)
+            else:
+                raise TypeError(
+                    f'{loss_name} is not a tensor or list of tensors')
+
+        loss = sum(_value for _key, _value in log_vars.items()
+                   if 'loss' in _key)
+
+        # If the loss_vars has different length, GPUs will wait infinitely
+        if dist.is_available() and dist.is_initialized():
+            log_var_length = torch.tensor(len(log_vars), device=loss.device)
+            dist.all_reduce(log_var_length)
+            message = (f'rank {dist.get_rank()}' +
+                       f' len(log_vars): {len(log_vars)}' + ' keys: ' +
+                       ','.join(log_vars.keys()))
+            assert log_var_length == len(log_vars) * dist.get_world_size(), \
+                'loss log variables are different across GPUs!\n' + message
+
+        log_vars['loss'] = loss
+        for loss_name, loss_value in log_vars.items():
+            # reduce loss when distributed training
+            if dist.is_available() and dist.is_initialized():
+                loss_value = loss_value.data.clone()
+                dist.all_reduce(loss_value.div_(dist.get_world_size()))
+            log_vars[loss_name] = loss_value.item()
+
+        return loss, log_vars
+
+    def train_step(self, data, optimizer):
+        """The iteration step during training.
+
+        This method defines an iteration step during training, except for the
+        back propagation and optimizer updating, which are done in an optimizer
+        hook. Note that in some complicated cases or models, the whole process
+        including back propagation and optimizer updating is also defined in
+        this method, such as GAN.
+
+        Args:
+            data (dict): The output of dataloader.
+            optimizer (:obj:`torch.optim.Optimizer` | dict): The optimizer of
+                runner is passed to ``train_step()``. This argument is unused
+                and reserved.
+
+        Returns:
+            dict: It should contain at least 3 keys: ``loss``, ``log_vars``, \
+                ``num_samples``.
+
+                - ``loss`` is a tensor for back propagation, which can be a
+                  weighted sum of multiple losses.
+                - ``log_vars`` contains all the variables to be sent to the
+                  logger.
+                - ``num_samples`` indicates the batch size (when the model is
+                  DDP, it means the batch size on each GPU), which is used for
+                  averaging the logs.
+        """
+        losses = self(**data)
+        loss, log_vars = self._parse_losses(losses)
+
+        outputs = dict(
+            loss=loss, log_vars=log_vars, num_samples=len(data['img_metas']))
+
+        return outputs
+
+    def val_step(self, data, optimizer=None):
+        """The iteration step during validation.
+
+        This method shares the same signature as :func:`train_step`, but used
+        during val epochs. Note that the evaluation after training epochs is
+        not implemented with this method, but an evaluation hook.
+        """
+        losses = self(**data)
+        loss, log_vars = self._parse_losses(losses)
+
+        outputs = dict(
+            loss=loss, log_vars=log_vars, num_samples=len(data['img_metas']))
+
+        return outputs
+    
     def simple_test(self, *args, **kwargs):
         pass
 

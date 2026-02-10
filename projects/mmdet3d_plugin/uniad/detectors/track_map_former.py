@@ -38,6 +38,10 @@ class Track_Map_Former(UniADTrack):
 
         self.task_loss_weight = task_loss_weight
 
+    @property
+    def with_seg_head(self):
+        return hasattr(self, 'seg_head') and self.seg_head is not None
+
     def forward(self, return_loss=True, **kwargs):
         if return_loss:
             return self.forward_train(**kwargs)
@@ -233,10 +237,9 @@ class Track_Map_Former(UniADTrack):
             # all_matched_idxes: len=dec nums, N*2
             track_instances = frame_res["track_instances"]
         
-        get_keys = ["bev_embed", "bev_pos",
+        get_keys = ["bev_embed",
                     "track_query_embeddings", "track_query_matched_idxes", "track_bbox_results",
                     "sdc_boxes_3d", "sdc_scores_3d", "sdc_track_scores", "sdc_track_bbox_results", "sdc_embedding"]
-        get_keys += ["img_feat_2D"]
         get_keys += ["track_instances"]
         out.update({k: frame_res[k] for k in get_keys})
         

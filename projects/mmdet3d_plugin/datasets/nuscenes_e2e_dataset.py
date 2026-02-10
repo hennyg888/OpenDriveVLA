@@ -303,11 +303,11 @@ class NuScenesE2EDataset(NuScenesDataset):
         gt_offset_list = [each['gt_offset'].data for each in queue] if 'gt_offset' in queue[0] else None
         gt_flow_list = [each['gt_flow'].data for each in queue] if 'gt_flow' in queue[0] else None
         gt_backward_flow_list = [each['gt_backward_flow'].data for each in queue] if 'gt_backward_flow' in queue[0] else None
-        gt_occ_has_invalid_frame_list = [each['gt_occ_has_invalid_frame'].data for each in queue] if 'gt_occ_has_invalid_frame' in queue[0] else None
-        gt_occ_img_is_valid_list = [each['gt_occ_img_is_valid'].data for each in queue] if 'gt_occ_img_is_valid' in queue[0] else None
-        sdc_planning_list = [each['sdc_planning'].data for each in queue] if 'sdc_planning' in queue[0] else None
-        sdc_planning_mask_list = [each['sdc_planning_mask'].data for each in queue] if 'sdc_planning_mask' in queue[0] else None
-        command_list = [each['command'].data for each in queue] if 'command' in queue[0] else None
+        gt_occ_has_invalid_frame_list = [each['gt_occ_has_invalid_frame'] if not isinstance(each['gt_occ_has_invalid_frame'], DC) else each['gt_occ_has_invalid_frame'].data for each in queue] if 'gt_occ_has_invalid_frame' in queue[0] else None
+        gt_occ_img_is_valid_list = [each['gt_occ_img_is_valid'] if not isinstance(each['gt_occ_img_is_valid'], DC) else each['gt_occ_img_is_valid'].data for each in queue] if 'gt_occ_img_is_valid' in queue[0] else None
+        sdc_planning_list = [each['sdc_planning'] if not isinstance(each['sdc_planning'], DC) else each['sdc_planning'].data for each in queue] if 'sdc_planning' in queue[0] else None
+        sdc_planning_mask_list = [each['sdc_planning_mask'] if not isinstance(each['sdc_planning_mask'], DC) else each['sdc_planning_mask'].data for each in queue] if 'sdc_planning_mask' in queue[0] else None
+        command_list = [each['command'] if not isinstance(each['command'], DC) else each['command'].data for each in queue] if 'command' in queue[0] else None
         gt_past_traj_list = [to_tensor(each['gt_past_traj']) for each in queue]
         gt_past_traj_mask_list = [
             to_tensor(each['gt_past_traj_mask']) for each in queue]
@@ -383,15 +383,15 @@ class NuScenesE2EDataset(NuScenesDataset):
         if gt_backward_flow_list is not None:
             queue['gt_backward_flow'] = DC(gt_backward_flow_list)
         if gt_occ_has_invalid_frame_list is not None:
-            queue['gt_occ_has_invalid_frame'] = DC(gt_occ_has_invalid_frame_list)
+            queue['gt_occ_has_invalid_frame'] = DC(gt_occ_has_invalid_frame_list, cpu_only=True)
         if gt_occ_img_is_valid_list is not None:
-            queue['gt_occ_img_is_valid'] = DC(gt_occ_img_is_valid_list)
+            queue['gt_occ_img_is_valid'] = DC(gt_occ_img_is_valid_list, cpu_only=True)
         if sdc_planning_list is not None:
-            queue['sdc_planning'] = DC(sdc_planning_list)
+            queue['sdc_planning'] = DC(sdc_planning_list, cpu_only=True)
         if sdc_planning_mask_list is not None:
-            queue['sdc_planning_mask'] = DC(sdc_planning_mask_list)
+            queue['sdc_planning_mask'] = DC(sdc_planning_mask_list, cpu_only=True)
         if command_list is not None:
-            queue['command'] = DC(command_list)
+            queue['command'] = DC(command_list, cpu_only=True)
         queue['l2g_r_mat'] = DC(l2g_r_mat_list)
         queue['l2g_t'] = DC(l2g_t_list)
         queue['timestamp'] = DC(timestamp_list)
