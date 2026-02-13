@@ -33,7 +33,8 @@ class UniADBevFusion(nn.Module):
         self.freeze_bevfusion_bn = freeze_bevfusion_bn
         self.bev_in_hw = bev_in_hw
         self.bev_out_hw = bev_out_hw
-        self.bev_linear = nn.Linear(bev_in_hw * bev_in_hw, bev_out_hw * bev_out_hw)
+        # Use bilinear interpolation instead of linear layer to save memory
+        # No trainable parameters, purely geometric transformation
 
         self.bevfusion = (
             build_fusion_model(bevfusion, train_cfg=train_cfg, test_cfg=test_cfg)
@@ -54,10 +55,7 @@ class UniADBevFusion(nn.Module):
             self.bevfusion.init_weights()
         if hasattr(self.track_map_former, "init_weights"):
             self.track_map_former.init_weights()
-        
-        # Convert track_map_former to FP16 to save memory (BEVFusion stays in FP32)
-        if self.track_map_former is not None:
-            self.track_map_former.half()
+    
 
     def train(self, mode=True):
         super().train(mode)
@@ -75,31 +73,56 @@ class UniADBevFusion(nn.Module):
             param.requires_grad = False
 
     def _resize_bev_feat(self, bev_feat):
+        """
+        Resize BEV features using bilinear interpolation (no trainable parameters).
+        Supports multiple input formats: [B, C, H, W], [B, N, C, H, W], or [HW, B, C].
+        """
         if bev_feat is None:
             return None
+        
         if bev_feat.dim() == 5:
-            # B, N, C, H, W -> B, C, HW
+            # B, N, C, H, W -> B, N*C, H, W
             b, n, c, h, w = bev_feat.shape
+            if h == self.bev_out_hw and w == self.bev_out_hw:
+                return bev_feat
             bev_feat = bev_feat.view(b, n * c, h, w)
-            bev_feat = self._resize_bev_feat(bev_feat)
+            # Bilinear interpolate: [B, N*C, H, W] -> [B, N*C, H', W']
+            bev_feat = torch.nn.functional.interpolate(
+                bev_feat, size=(self.bev_out_hw, self.bev_out_hw),
+                mode='bilinear', align_corners=False
+            )
             bev_feat = bev_feat.view(b, n, c, self.bev_out_hw, self.bev_out_hw)
             return bev_feat
+        
         if bev_feat.dim() == 4:
-            # B, C, H, W -> B, C, HW
+            # B, C, H, W
             b, c, h, w = bev_feat.shape
             if h == self.bev_out_hw and w == self.bev_out_hw:
                 return bev_feat
-            bev_flat = bev_feat.view(b, c, h * w)
-            bev_flat = self.bev_linear(bev_flat)
-            return bev_flat.view(b, c, self.bev_out_hw, self.bev_out_hw)
+            # Bilinear interpolate: [B, C, H, W] -> [B, C, H', W']
+            return torch.nn.functional.interpolate(
+                bev_feat, size=(self.bev_out_hw, self.bev_out_hw),
+                mode='bilinear', align_corners=False
+            )
+        
         if bev_feat.dim() == 3:
-            # HW, B, C -> B, C, HW
+            # HW, B, C -> B, C, H, W
             hw, b, c = bev_feat.shape
             if hw == self.bev_out_hw * self.bev_out_hw:
                 return bev_feat
-            bev_flat = bev_feat.permute(1, 2, 0).contiguous()
-            bev_flat = self.bev_linear(bev_flat)
-            return bev_flat.view(b, c, self.bev_out_hw, self.bev_out_hw)
+            h = w = int(hw ** 0.5)
+            assert h * w == hw, f"Cannot reshape {hw} to square"
+            bev_feat = bev_feat.permute(1, 2, 0).contiguous()  # [B, C, HW]
+            bev_feat = bev_feat.view(b, c, h, w)  # [B, C, H, W]
+            # Bilinear interpolate
+            bev_feat = torch.nn.functional.interpolate(
+                bev_feat, size=(self.bev_out_hw, self.bev_out_hw),
+                mode='bilinear', align_corners=False
+            )
+            # [B, C, H', W'] -> [H'*W', B, C]
+            bev_feat = bev_feat.view(b, c, -1).permute(2, 0, 1).contiguous()
+            return bev_feat
+        
         raise ValueError(f"Unsupported bev_feat shape: {bev_feat.shape}")
 
     def _extract_calib_from_metas(self, img_metas):
@@ -244,6 +267,11 @@ class UniADBevFusion(nn.Module):
                     gt_labels_3d=gt_labels_3d,
                     **kwargs,
                 )
+            # Detach to completely cut off gradient graph from BEVFusion
+            bev_feat = bev_feat.detach()
+            if img_feat_2d is not None:
+                img_feat_2d = img_feat_2d.detach()
+            
         else:
             bev_feat, img_feat_2d = self.bevfusion(
                 img,
@@ -265,7 +293,9 @@ class UniADBevFusion(nn.Module):
                 **kwargs,
             )
 
+        # Apply bilinear interpolation to resize BEV features (no trainable parameters)
         bev_feat = self._resize_bev_feat(bev_feat)
+        
         return bev_feat, img_feat_2d
 
     def forward(self, return_loss=True, **kwargs):
@@ -338,8 +368,30 @@ class UniADBevFusion(nn.Module):
         gt_labels_3d_unwrapped = unwrap_if_nested(gt_labels_3d, queue_len)
         gt_inds_unwrapped = unwrap_if_nested(gt_inds, queue_len)
         
+        # Detach img if bevfusion is frozen (already done in previous optimization)
+        # Detach calibration matrices to save memory (they don't need gradients)
+        if camera2ego is not None:
+            camera2ego = [c.detach() if torch.is_tensor(c) else c for c in camera2ego]
+        if lidar2ego is not None:
+            lidar2ego = [l.detach() if torch.is_tensor(l) else l for l in lidar2ego]
+        if lidar2camera is not None:
+            lidar2camera = [l.detach() if torch.is_tensor(l) else l for l in lidar2camera]
+        if lidar2image is not None:
+            lidar2image = [l.detach() if torch.is_tensor(l) else l for l in lidar2image]
+        if camera_intrinsics is not None:
+            camera_intrinsics = [c.detach() if torch.is_tensor(c) else c for c in camera_intrinsics]
+        if camera2lidar is not None:
+            camera2lidar = [c.detach() if torch.is_tensor(c) else c for c in camera2lidar]
+        if img_aug_matrix is not None:
+            img_aug_matrix = [i.detach() if torch.is_tensor(i) else i for i in img_aug_matrix]
+        if lidar_aug_matrix is not None:
+            lidar_aug_matrix = [l.detach() if torch.is_tensor(l) else l for l in lidar_aug_matrix]
+        
+        # Detach img if bevfusion is frozen to save memory (no gradients needed)
+        if self.freeze_bevfusion and img is not None:
+            img = img.detach()
+        
         bev_feats = []
-        img_feat_2ds = []
         
         # Extract metas_map for multi-frame indexing
         # img_metas is typically [metas_map] where metas_map = {0: meta0, 1: meta1, ...}
@@ -392,7 +444,7 @@ class UniADBevFusion(nn.Module):
             else:
                 cur_img_metas = img_metas if i == 0 else None  # fallback
             
-            bev_feat, img_feat_2d = self.extract_feat(
+            bev_feat, _ = self.extract_feat(
                 img=cur_img,
                 points=cur_points,
                 camera2ego=camera2ego[i],
@@ -414,10 +466,15 @@ class UniADBevFusion(nn.Module):
             if bev_feat.dim() == 4 and bev_feat.shape[0] == 1:
                 bev_feat = bev_feat.squeeze(0)  # [C, H, W]
             bev_feats.append(bev_feat)
-            img_feat_2ds.append(img_feat_2d)
+            
+            # Clear intermediate variables to free memory
+            del cur_img, cur_points
 
         # Stack: [queue_length, C, H, W]
         bev_feat = torch.stack(bev_feats, dim=0)
+        
+        # Delete intermediate list immediately
+        del bev_feats
         
         # Clear cache to free memory after BEVFusion forward (BEVFusion is freeze and detached)
         if torch.cuda.is_available():
@@ -426,10 +483,13 @@ class UniADBevFusion(nn.Module):
         # Reshape for track_map_former: [queue_length, C, H, W] -> [queue_length, H*W, 1, C]
         # The extra dimension is batch (=1), needed for transformer decoder
         queue_length, C, H, W = bev_feat.shape
-        bev_embed = bev_feat.flatten(2).permute(0, 2, 1).unsqueeze(2).contiguous()  # [queue_length, H*W, 1, C]
+        bev_embed = bev_feat.flatten(2).permute(0, 2, 1).unsqueeze(2)  # [queue_length, H*W, 1, C]
         
-        # Convert to FP16 for track_map_former (which is in FP16 mode)
-        bev_embed = bev_embed.half()
+        # Delete bev_feat to save memory before converting to FP16
+        del bev_feat
+        
+        # Keep in FP32 for numerical stability (FP16 causes NaN in loss)
+        bev_embed = bev_embed.contiguous()
 
         if self.track_map_former is None:
             raise RuntimeError("track_map_former is required for forward_train.")
@@ -461,6 +521,7 @@ class UniADBevFusion(nn.Module):
             command=command,
             **kwargs,
         )
+        
         return losses
 
     @auto_fp16(apply_to=("img", "points"))

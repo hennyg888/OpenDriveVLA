@@ -741,7 +741,20 @@ evaluation = dict(
 )
 runner = dict(type="EpochBasedRunner", max_epochs=total_epochs)
 log_config = dict(
-    interval=10, hooks=[dict(type="TextLoggerHook"), dict(type="TensorboardLoggerHook")]
+    interval=10, 
+    hooks=[
+        dict(type="TextLoggerHook"),
+        dict(type="TensorboardLoggerHook"),
+        dict(
+            type="WandbLoggerHook",
+            init_kwargs=dict(
+                project="uniad_bevfusion",
+                name="pretrain",
+                tags=["bevfusion_backbone", "track_map_former", "pretrain"],
+            ),
+            log_artifact=True,
+        ),
+    ]
 )
 checkpoint_config = dict(interval=1)
 load_from = None

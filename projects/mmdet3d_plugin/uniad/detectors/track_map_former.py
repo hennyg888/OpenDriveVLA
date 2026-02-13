@@ -189,6 +189,7 @@ class Track_Map_Former(UniADTrack):
             boxes = gt_bboxes_3d[0][i].tensor.to(bev_embed.device)
             # normalize gt bboxes here!
             boxes = normalize_bbox(boxes, self.pc_range)
+            
             sd_boxes = gt_sdc_bbox[0][i].tensor.to(bev_embed.device)
             sd_boxes = normalize_bbox(sd_boxes, self.pc_range)
             gt_instances.boxes = boxes
@@ -244,6 +245,7 @@ class Track_Map_Former(UniADTrack):
         out.update({k: frame_res[k] for k in get_keys})
         
         losses = self.criterion.losses_dict
+        
         return losses, out
 
     @auto_fp16(apply_to=('img', 'points'))
@@ -287,8 +289,14 @@ class Track_Map_Former(UniADTrack):
         bev_embed = outs_track["bev_embed"]
 
         img_metas = [each[len_queue-1] for each in img_metas]
+        
+        # Extract last frame for GT lane data (matching img_metas extraction)
+        if gt_lane_labels and len(gt_lane_labels) > 0 and isinstance(gt_lane_labels[0], list):
+            gt_lane_labels = [each[len_queue-1] for each in gt_lane_labels]
+            gt_lane_bboxes = [each[len_queue-1] for each in gt_lane_bboxes]
+            gt_lane_masks = [each[len_queue-1] for each in gt_lane_masks]
 
-        if self.with_seg_head:          
+        if self.with_seg_head:
             losses_seg, outs_seg = self.seg_head.forward_train(bev_embed, img_metas,
                                                           gt_lane_labels, gt_lane_bboxes, gt_lane_masks)
             
