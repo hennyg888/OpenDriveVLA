@@ -39,6 +39,10 @@ class Track_Map_Former(UniADTrack):
         self.task_loss_weight = task_loss_weight
 
     @property
+    def with_motion_head(self):
+        return hasattr(self, 'motion_head') and self.motion_head is not None
+
+    @property
     def with_seg_head(self):
         return hasattr(self, 'seg_head') and self.seg_head is not None
 
@@ -356,7 +360,7 @@ class Track_Map_Former(UniADTrack):
             "pred_logits": output_classes,
             "pred_boxes": output_coords,
             "ref_pts": last_ref_pts,
-            #"bev_embed": bev_embed, bev_embed already available directly
+            "bev_embed": bev_embed,
             "query_embeddings": query_feats,
             "all_past_traj_preds": det_output["all_past_traj_preds"],
             #"bev_pos": bev_pos, only used in motion former, not needed
@@ -461,7 +465,7 @@ class Track_Map_Former(UniADTrack):
         """ predict and update """
         #prev_bev = self.prev_bev
         frame_res = self._forward_single_frame_track_inference(
-            bev_embed,
+            bev_hwbc,
             img_metas,
             track_instances,
             #prev_bev,
@@ -478,7 +482,7 @@ class Track_Map_Former(UniADTrack):
 
         self.test_track_instances = track_instances
         result_track = [dict()]
-        get_keys = ["bev_embed", "bev_pos", 
+        get_keys = ["bev_embed",
                     "track_query_embeddings", "track_bbox_results", 
                     "boxes_3d", "scores_3d", "labels_3d", "track_scores", "track_ids"]
         #get_keys += ["img_feat_2D"]

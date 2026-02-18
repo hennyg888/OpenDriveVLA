@@ -619,8 +619,7 @@ test_pipeline = [
     dict(
         type="ImageNormalize",
         mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225],
-        to_tensor=True),
+        std=[0.229, 0.224, 0.225]),
     dict(
     type='GenerateOccFlowLabels',
     grid_conf=occflow_grid_conf,
@@ -648,8 +647,14 @@ test_pipeline = [
             "camera2lidar",
             "img_aug_matrix",
             "lidar_aug_matrix",
+            "pts_filename",
+            # "transformation_3d_flow", 
+            "scene_token",
+            # "can_bus",
+            # "l2g_r_mat",    
         )),
 ]
+
 
 data = dict(
     samples_per_gpu=1,
@@ -706,12 +711,21 @@ data = dict(
 
     test=dict(
         type=dataset_type,
+        file_client_args=file_client_args,
         data_root=data_root,
+        test_mode=True,
         ann_file=data_root + "nuscenes_infos_temporal_val.pkl",
         pipeline=test_pipeline,
+        patch_size=patch_size,
+        canvas_size=canvas_size,
+        bev_size=(bev_h_, bev_w_),
+        predict_steps=predict_steps,
+        past_steps=past_steps,
+        fut_steps=fut_steps,
+        occ_n_future=occ_n_future_max,
+        use_nonlinear_optimizer=use_nonlinear_optimizer,
         classes=object_classes,
         modality=input_modality,
-        test_mode=True,
         box_type_3d="LiDAR",
         eval_mod=['map', 'track'],
     ),
@@ -749,7 +763,7 @@ log_config = dict(
             type="WandbLoggerHook",
             init_kwargs=dict(
                 project="uniad_bevfusion",
-                name="pretrain",
+                name="pretrain_resume1",
                 tags=["bevfusion_backbone", "track_map_former", "pretrain"],
             ),
             log_artifact=True,
@@ -758,5 +772,5 @@ log_config = dict(
 )
 checkpoint_config = dict(interval=1)
 load_from = None
-resume_from = None
+resume_from = "/home/s56cai/OpenDriveVLA/projects/work_dirs/uniad_bevfusion/pretrain/epoch_1.pth"
 find_unused_parameters = True
