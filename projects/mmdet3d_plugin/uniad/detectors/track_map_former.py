@@ -493,9 +493,56 @@ class Track_Map_Former(UniADTrack):
         result_track[0].update({k: frame_res[k] for k in get_keys})
         result_track = self._det_instances2results(track_instances_fordet, result_track, img_metas)
 
+        # normalize for local inspection (keep return value as list for callers)
+        rt = result_track[0] if isinstance(result_track, list) and len(result_track) > 0 else result_track
+
+        # --- debug & sanity checks (helps explain "AMOTA==0" during evaluation) ---
+        if rt is None:
+            print(f"[WARN] empty track result for scene={img_metas[0].get('scene_token','N/A')}")
+        else:
+            try:
+                # count predicted boxes (if any)
+                num_boxes = 0
+                if 'track_bbox_results' in rt and rt['track_bbox_results']:
+                    tb = rt['track_bbox_results']
+                    if isinstance(tb, list) and len(tb) and isinstance(tb[0], list) and len(tb[0]):
+                        num_boxes = tb[0][0].tensor.shape[0]
+                track_ids = rt.get('track_ids', None)
+                track_scores = rt.get('track_scores', None)
+                min_score = None
+                max_score = None
+                if track_scores is not None:
+                    try:
+                        min_score = float(track_scores.min())
+                        max_score = float(track_scores.max())
+                    except Exception:
+                        min_score, max_score = None, None
+                print(f"[DEBUG] scene={img_metas[0].get('scene_token','N/A')}, num_boxes={num_boxes} track_ids_len={0 if track_ids is None else len(track_ids)} track_scores_minmax={(min_score,max_score)}")
+                print(f"[DEBUG] track_ids: {track_ids}")
+                print(f"[DEBUG] track_scores: {track_scores}")
+                print(f"[DEBUG] track_bbox_results: {rt.get('track_bbox_results', None)}")
+                # quick consistency check
+                if 'track_ids' in rt and 'track_bbox_results' in rt and num_boxes>0:
+                    tid_len = len(rt['track_ids']) if hasattr(rt['track_ids'], '__len__') else 0
+                    if tid_len != num_boxes:
+                        print(f"[WARN] mismatch track_ids ({tid_len}) vs boxes ({num_boxes}) — tracker -> eval mismatch")
+                if 'track_scores' in rt and track_scores is not None:
+                    # check score range
+                    try:
+                        if (track_scores < 0).any() or (track_scores > 1).any():
+                            print(f"[WARN] track_scores out of [0,1] range; this can break thresholding in evaluator")
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"[DEBUG] failed to introspect result_track: {e}")
+
         if gt_bboxes_3d is not None and gt_inds is not None:
-            detected_boxes3d = result_track["track_bbox_results"][0][0].tensor  # LiDARInstance3DBoxes.tensor
-            if detected_boxes3d.shape[0] > 0:
+            # use normalized rt for safety
+            if rt is None:
+                detected_boxes3d = None
+            else:
+                detected_boxes3d = rt["track_bbox_results"][0][0].tensor  # LiDARInstance3DBoxes.tensor
+            if detected_boxes3d is not None and detected_boxes3d.shape[0] > 0:
                 detected_bboxes = detected_boxes3d.to(gt_bboxes_3d[0][0][0].tensor)[:-1, :7]  # drop sdc
 
                 gt_boxes = gt_bboxes_3d[0][0][0].tensor[:, :7]
@@ -507,7 +554,14 @@ class Track_Map_Former(UniADTrack):
                     if 0 <= int(gt_idx) < len(gt_inds_frame):
                         track_gt_inds_to_embed_idx[int(gt_inds_frame[int(gt_idx)])] = int(embed_idx)
 
-                result_track["track_gt_inds_to_embed_idx"] = track_gt_inds_to_embed_idx
+                # attach to the dict form for downstream usage
+                if isinstance(result_track, list) and len(result_track) > 0 and isinstance(result_track[0], dict):
+                    result_track[0]["track_gt_inds_to_embed_idx"] = track_gt_inds_to_embed_idx
+                elif isinstance(result_track, dict):
+                    result_track["track_gt_inds_to_embed_idx"] = track_gt_inds_to_embed_idx
+                else:
+                    # keep backward-compatible: add to top-level return dict later
+                    pass
 
         result_seg = None
         for meta in img_metas:

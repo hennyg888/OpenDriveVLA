@@ -129,7 +129,7 @@ model = dict(
                     convert_weights=True,
                     init_cfg=dict(
                         type="Pretrained",
-                        checkpoint="/home/s56cai/.cache/torch/hub/checkpoints/swin_tiny_patch4_window7_224.pth",
+                        checkpoint="/home/hhguo/.cache/torch/hub/checkpoints/swin_tiny_patch4_window7_224.pth",
                     ),
                 ),
                 neck=dict(

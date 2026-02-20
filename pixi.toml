@@ -57,6 +57,7 @@ scikit-image = "==0.19.3"
 fsspec = "*"
 triton = "*"
 #mmdet3d = "==1.0.0rc6" #original wanted local thirdparty/mmdet3d
+#shapely = "==1.8.5.post1" #causes cv2 color error
 
 #mmdet3d = {path = "third_party/mmdetection3d_1_0_0rc6"}
 

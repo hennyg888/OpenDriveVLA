@@ -25,7 +25,7 @@ def _add_repo_to_syspath():
 
 _add_repo_to_syspath()
 
-UNIAD_BEVFUSION_CONFIG = "/home/s56cai/OpenDriveVLA/projects/configs/uniad_bevfusion/pretrain.py"
+UNIAD_BEVFUSION_CONFIG = "/home/hhguo/OpenDriveVLA/projects/configs/uniad_bevfusion/pretrain.py"
 UNIAD_BEVFUSION_CKPT = "/home/s56cai/OpenDriveVLA/projects/work_dirs/uniad_bevfusion/pretrain/epoch_5.pth"
 
 EVAL_MOD = ["track", "map"]
@@ -116,7 +116,7 @@ def pack_for_nuscenes_e2e(out: Dict[str, Any]) -> Dict[str, Any]:
 
     if "ret_iou" in rs:
         packed["ret_iou"] = rs["ret_iou"]
-
+    
     # if "traj" in rt:
     #     packed["traj"] = rt["traj"]
     # if "traj_scores" in rt:
