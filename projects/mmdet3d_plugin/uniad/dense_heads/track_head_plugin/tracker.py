@@ -14,8 +14,10 @@ class RuntimeTrackerBase(object):
         self.max_obj_id = 0
 
     def update(self, track_instances: Instances, iou_thre=None):
+        #print(len(track_instances), "track instances before update")
         track_instances.disappear_time[track_instances.scores >= self.score_thresh] = 0
         for i in range(len(track_instances)):
+            #print(f"track instance {i}, obj_idx {track_instances.obj_idxes[i]}, score {track_instances.scores[i]}, disappear_time {track_instances.disappear_time[i]}")
             if (
                 track_instances.obj_idxes[i] == -1
                 and track_instances.scores[i] >= self.score_thresh
@@ -25,7 +27,7 @@ class RuntimeTrackerBase(object):
                     if iou3ds.max()>iou_thre:
                         continue
                 # new track
-                # print("track {} has score {}, assign obj_id {}".format(i, track_instances.scores[i], self.max_obj_id))
+                print("track_base update: track {} has score {}, assign obj_id {}".format(i, track_instances.scores[i], self.max_obj_id))
                 track_instances.obj_idxes[i] = self.max_obj_id
                 self.max_obj_id += 1
             elif (
@@ -35,6 +37,7 @@ class RuntimeTrackerBase(object):
                 # sleep time ++
                 track_instances.disappear_time[i] += 1
                 if track_instances.disappear_time[i] >= self.miss_tolerance:
+                    print(f"track_base update: track {i} disappeared")
                     # mark deaded tracklets: Set the obj_id to -1.
                     # TODO: remove it by following functions
                     # Then this track will be removed by TrackEmbeddingLayer.

@@ -189,7 +189,7 @@ def main():
         # keep track of raw tracking bboxes from data for printout
         gt_track_boxes: List[Any] = []
         sample_count = 0
-        #max_samples = 1
+        max_samples = 10
 
         for data in data_loader:
             #data.keys() dict_keys(['img_metas', 'img', 'points', 'timestamp', 'l2g_r_mat', 'l2g_t', 'gt_lane_labels', 'gt_lane_bboxes', 'gt_lane_masks', 'gt_segmentation'])
@@ -205,8 +205,8 @@ def main():
                 # finished the scene or moved to next scene
                 break
 
-            # if sample_count >= max_samples:
-            #     break
+            if sample_count >= max_samples:
+                break
 
             # prepare everything for this sample
             timestamp = to_device(unwrap_dc(data.get("timestamp", None)), device)

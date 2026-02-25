@@ -345,6 +345,8 @@ class Track_Map_Former(UniADTrack):
         # NOTE: You can replace BEVFormer with other BEV encoder and provide bev_embed here
         #bev_embed, bev_pos, img_feat_2D = self.get_bevs(img, img_metas, prev_bev=prev_bev)
         #getting bev_embed directly from bevfusion now
+        #print("track_instances.query: ", track_instances.query)
+        #print("track_instances.ref_pts: ", track_instances.ref_pts)
         det_output = self.pts_bbox_head.get_detections(
             bev_embed, 
             object_query_embeds=track_instances.query,
@@ -378,7 +380,7 @@ class Track_Map_Former(UniADTrack):
         # hard_code: assume the 901 query is sdc query 
         track_instances.obj_idxes[900] = -2
         """ update track base """
-        self.track_base.update(track_instances, None)
+        self.track_base.update(track_instances, 0.5)
        
         active_index = (track_instances.obj_idxes>=0) & (track_instances.scores >= self.track_base.filter_score_thresh)    # filter out sleep objects
         out.update(self.select_active_track_query(track_instances, active_index, img_metas))
@@ -422,6 +424,8 @@ class Track_Map_Former(UniADTrack):
         assert bev_embed is not None, "bev_embed is required"
         assert img_metas is not None, "img_metas is required"
         assert len(img_metas) == 1, "only single batch test is supported"
+        print("bev_embed shape:", bev_embed.shape)  # debug print
+        print("self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w:", self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w)  # debug print
 
         if bev_embed.dim() == 4:
             B, C, H, W = bev_embed.shape
@@ -437,18 +441,20 @@ class Track_Map_Former(UniADTrack):
 
         assert bev_hwbc.shape[0] == self.pts_bbox_head.bev_h * self.pts_bbox_head.bev_w
 
+        print("bev_hwbc.shape: ", bev_hwbc.shape)  # debug print
         """ init track instances for first frame """
         if (
             self.test_track_instances is None
             or img_metas[0]["scene_token"] != self.scene_token
-        ):
+        ):  
+            print("*****WARNING starting new track WARNING*****")
             self.timestamp = timestamp
             self.scene_token = img_metas[0]["scene_token"]
             #self.prev_bev = None
             track_instances = self._generate_empty_tracks()
             time_delta, l2g_r1, l2g_t1, l2g_r2, l2g_t2 = None, None, None, None, None
-            
         else:
+            print("using old track")
             track_instances = self.test_track_instances
             time_delta = timestamp - self.timestamp
             l2g_r1 = self.l2g_r_mat
@@ -479,6 +485,8 @@ class Track_Map_Former(UniADTrack):
         #self.prev_bev = frame_res["bev_embed"]
         track_instances = frame_res["track_instances"]
         track_instances_fordet = frame_res["track_instances_fordet"]
+        #print("track_instances_fordet:", track_instances_fordet)  # debug print
+        #print("track_instances:", track_instances)  # debug print
 
         self.test_track_instances = track_instances
         result_track = [dict()]
