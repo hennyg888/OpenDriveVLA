@@ -46,6 +46,43 @@ class Track_Map_Former(UniADTrack):
     def with_seg_head(self):
         return hasattr(self, 'seg_head') and self.seg_head is not None
 
+    def get_history_bev(self, bev_embeds_queue, img_metas_list):
+        self.eval()
+        with torch.no_grad():
+            prev_bev = None
+            #assuming bs=1
+            bs, len_queue, C, H, W = bev_embeds_queue.shape
+            bev_embeds_queue = bev_embeds_queue.reshape(bs * len_queue, C, H, W)
+            for i in range(len_queue):
+                img_metas = [each[i] for each in img_metas_list]
+                this_bev_embed = bev_embeds_queue[i]
+                # Convert [C, H, W] to [H*W, 1, C] for get_bev_embed_with_history
+                this_bev_embed = this_bev_embed.flatten(1).permute(1, 0).unsqueeze(1)  # [C, H*W] -> [H*W, C] -> [H*W, 1, C]
+                prev_bev, _ = self.pts_bbox_head.get_bev_embed_with_history(
+                    current_bev_embed=this_bev_embed, 
+                    img_metas=img_metas, 
+                    prev_bev=prev_bev)
+        self.train()
+        return prev_bev
+
+    def get_bevs(self, bev_embed, img_metas, prev_bev=None, past_bev=None, prev_img_metas=None):
+        if past_bev is not None:
+            assert prev_bev is None
+            prev_bev = self.get_history_bev(past_bev, prev_img_metas)
+        if self.freeze_bev_encoder:
+            with torch.no_grad():
+                bev_embed, bev_pos = self.pts_bbox_head.get_bev_embed_with_history(
+                    current_bev_embed=bev_embed, img_metas=img_metas, prev_bev=prev_bev)
+        else:
+            bev_embed, bev_pos = self.pts_bbox_head.get_bev_embed_with_history(
+                    current_bev_embed=bev_embed, img_metas=img_metas, prev_bev=prev_bev)
+        
+        if bev_embed.shape[1] == self.bev_h * self.bev_w:
+            bev_embed = bev_embed.permute(1, 0, 2)
+        
+        assert bev_embed.shape[0] == self.bev_h * self.bev_w
+        return bev_embed
+
     def forward(self, return_loss=True, **kwargs):
         if return_loss:
             return self.forward_train(**kwargs)
@@ -55,6 +92,8 @@ class Track_Map_Former(UniADTrack):
     def _forward_single_frame_train(
         self,
         bev_embed,
+        past_bev,
+        prev_img_metas,
         img_metas,
         track_instances,
         l2g_r1=None,
@@ -76,6 +115,13 @@ class Track_Map_Former(UniADTrack):
                 it means this frame is the end of the training clip,
                 so no need to call velocity update
         """
+        if past_bev is not None:
+            bev_embed = self.get_bevs(
+                bev_embed,
+                img_metas,
+                past_bev=past_bev,
+                prev_img_metas=prev_img_metas
+            )
 
         det_output = self.pts_bbox_head.get_detections(
             bev_embed,
@@ -211,6 +257,18 @@ class Track_Map_Former(UniADTrack):
 
         for i in range(num_frame):
             # img_single = torch.stack([img_[i] for img_ in img], dim=0)
+            #bev_embeds do not contain history
+            past_bev = bev_embed[:i, ...] if i != 0 else None
+            
+            # Convert past_bev from [i, H*W, 1, C] to [1, i, C, H, W] for get_history_bev
+            if past_bev is not None:
+                len_queue, num_query, bs, embed_dims = past_bev.shape
+                H = self.pts_bbox_head.bev_h
+                W = self.pts_bbox_head.bev_w
+                # [i, H*W, 1, C] -> [i, H*W, C] -> [i, C, H*W] -> [i, C, H, W] -> [1, i, C, H, W]
+                past_bev = past_bev.squeeze(2).permute(0, 2, 1).reshape(len_queue, embed_dims, H, W).unsqueeze(0)
+            
+            prev_img_metas = copy.deepcopy(img_metas)
             img_metas_single = [copy.deepcopy(img_metas[0][i])]
             if i == num_frame - 1:
                 l2g_r2 = None
@@ -226,6 +284,8 @@ class Track_Map_Former(UniADTrack):
             all_instances_pred_boxes = []
             frame_res = self._forward_single_frame_train(
                 bev_embed[i, ...],
+                past_bev,
+                prev_img_metas,
                 img_metas_single,
                 track_instances,
                 l2g_r_mat[0][i],
@@ -320,6 +380,7 @@ class Track_Map_Former(UniADTrack):
         bev_embed,
         img_metas,
         track_instances,
+        prev_bev,
         l2g_r1=None,
         l2g_t1=None,
         l2g_r2=None,
@@ -345,6 +406,10 @@ class Track_Map_Former(UniADTrack):
         # NOTE: You can replace BEVFormer with other BEV encoder and provide bev_embed here
         #bev_embed, bev_pos, img_feat_2D = self.get_bevs(img, img_metas, prev_bev=prev_bev)
         #getting bev_embed directly from bevfusion now
+        #print("track_instances.query: ", track_instances.query)
+        #print("track_instances.ref_pts: ", track_instances.ref_pts)
+        bev_embed = self.get_bevs(bev_embed, img_metas, prev_bev=prev_bev)
+
         det_output = self.pts_bbox_head.get_detections(
             bev_embed, 
             object_query_embeds=track_instances.query,
@@ -444,7 +509,7 @@ class Track_Map_Former(UniADTrack):
         ):
             self.timestamp = timestamp
             self.scene_token = img_metas[0]["scene_token"]
-            #self.prev_bev = None
+            self.prev_bev = None
             track_instances = self._generate_empty_tracks()
             time_delta, l2g_r1, l2g_t1, l2g_r2, l2g_t2 = None, None, None, None, None
             
@@ -463,12 +528,12 @@ class Track_Map_Former(UniADTrack):
         self.l2g_r_mat = l2g_r_mat
 
         """ predict and update """
-        #prev_bev = self.prev_bev
+        prev_bev = self.prev_bev
         frame_res = self._forward_single_frame_track_inference(
             bev_hwbc,
             img_metas,
             track_instances,
-            #prev_bev,
+            prev_bev,
             l2g_r1,
             l2g_t1,
             l2g_r2,
@@ -476,7 +541,7 @@ class Track_Map_Former(UniADTrack):
             time_delta,
         )
 
-        #self.prev_bev = frame_res["bev_embed"]
+        self.prev_bev = frame_res["bev_embed"]
         track_instances = frame_res["track_instances"]
         track_instances_fordet = frame_res["track_instances_fordet"]
 

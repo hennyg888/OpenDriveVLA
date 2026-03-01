@@ -138,6 +138,29 @@ class BEVFormerTrackHead(DETRHead):
             for m in self.cls_branches:
                 nn.init.constant_(m[-1].bias, bias_init)
     
+    def get_bev_embed_with_history(self, current_bev_embed, img_metas, prev_bev=None):
+        # bs, num_cam, _, _, _ = mlvl_feats[0].shape
+        #assume bs=1
+        bs=1
+        dtype = current_bev_embed[0].dtype
+        bev_queries = self.bev_embedding.weight.to(dtype)
+
+        bev_mask = torch.zeros((bs, self.bev_h, self.bev_w),
+                               device=bev_queries.device).to(dtype)
+        bev_pos = self.positional_encoding(bev_mask).to(dtype)
+        bev_embed = self.transformer.get_bev_embed_with_history(
+            current_bev_embed,
+            bev_queries,
+            self.bev_h,
+            self.bev_w,
+            grid_length=(self.real_h / self.bev_h,
+                         self.real_w / self.bev_w),
+            bev_pos=bev_pos,
+            prev_bev=prev_bev,
+            img_metas=img_metas,
+        )
+        return bev_embed, bev_pos
+    
     def get_bev_features(self, mlvl_feats, img_metas, prev_bev=None, external_bev=None):
         if external_bev is not None:
             if external_bev.dim() == 4:

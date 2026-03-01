@@ -125,8 +125,20 @@ class BEVFormerEncoder(TransformerLayerSequence):
         reference_points_cam = reference_points_cam[..., 0:2] / torch.maximum(
             reference_points_cam[..., 2:3], torch.ones_like(reference_points_cam[..., 2:3]) * eps)
 
-        reference_points_cam[..., 0] /= img_metas[0]['img_shape'][0][1]
-        reference_points_cam[..., 1] /= img_metas[0]['img_shape'][0][0]
+        # reference_points_cam[..., 0] /= img_metas[0]['img_shape'][0][1]
+        # reference_points_cam[..., 1] /= img_metas[0]['img_shape'][0][0]
+
+        # Handle img_shape format differences between training and testing
+        img_shape = img_metas[0]['img_shape']
+        if isinstance(img_shape[0], (list, tuple)):
+            # Training format: [(H,W), (H,W), ...] for multiple cameras
+            img_h, img_w = img_shape[0][0], img_shape[0][1]
+        else:
+            # Test format: (H, W) single tuple
+            img_h, img_w = img_shape[0], img_shape[1]
+
+        reference_points_cam[..., 0] /= img_w
+        reference_points_cam[..., 1] /= img_h
 
         bev_mask = (bev_mask & (reference_points_cam[..., 1:2] > 0.0)
                     & (reference_points_cam[..., 1:2] < 1.0)
@@ -190,7 +202,8 @@ class BEVFormerEncoder(TransformerLayerSequence):
             ref_3d, self.pc_range, img_metas)
 
         # bug: this code should be 'shift_ref_2d = ref_2d.clone()', we keep this bug for reproducing our results in paper.
-        shift_ref_2d = ref_2d  # .clone()
+        #fixed bug for bevfusionformer
+        shift_ref_2d = ref_2d.clone()
         shift_ref_2d += shift[:, None, None, :]
 
         # (num_query, bs, embed_dims) -> (bs, num_query, embed_dims)
@@ -278,7 +291,7 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
         self.fp16_enabled = False
         assert len(operation_order) == 6
         assert set(operation_order) == set(
-            ['self_attn', 'norm', 'cross_attn', 'ffn'])
+            ['self_attn', 'norm', 'temporal_cross_attn','ffn'])
 
     def forward(self,
                 query,
@@ -374,25 +387,52 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
                 query = self.norms[norm_index](query)
                 norm_index += 1
 
-            # spaital cross attention
-            elif layer == 'cross_attn':
+            #temporal cross attention
+            elif layer == 'temporal_cross_attn':
+                # TemporalCrossAttention expects batch_first format but value is in [num_query, bs, embed_dims]
+                # Need to convert value to batch_first before passing
+                if value is not None and value.dim() == 3 and value.shape[1] == 1:
+                    # value is [num_query, bs, embed_dims], convert to [bs, num_query, embed_dims]
+                    value_for_temporal = value.permute(1, 0, 2)
+                else:
+                    value_for_temporal = value
+                
                 query = self.attentions[attn_index](
                     query,
                     key,
-                    value,
+                    value_for_temporal,
                     identity if self.pre_norm else None,
-                    query_pos=query_pos,
-                    key_pos=key_pos,
-                    reference_points=ref_3d,
-                    reference_points_cam=reference_points_cam,
-                    mask=mask,
+                    query_pos=bev_pos,
+                    key_pos=bev_pos,
                     attn_mask=attn_masks[attn_index],
-                    key_padding_mask=key_padding_mask,
-                    spatial_shapes=spatial_shapes,
-                    level_start_index=level_start_index,
+                    key_padding_mask=query_key_padding_mask,
+                    reference_points=ref_2d,
+                    spatial_shapes=torch.tensor(
+                        [[bev_h, bev_w]], device=query.device),
+                    level_start_index=torch.tensor([0], device=query.device),
                     **kwargs)
                 attn_index += 1
                 identity = query
+
+            ## spaital cross attention
+            # elif layer == 'cross_attn':
+            #     query = self.attentions[attn_index](
+            #         query,
+            #         key,
+            #         value,
+            #         identity if self.pre_norm else None,
+            #         query_pos=query_pos,
+            #         key_pos=key_pos,
+            #         reference_points=ref_3d,
+            #         reference_points_cam=reference_points_cam,
+            #         mask=mask,
+            #         attn_mask=attn_masks[attn_index],
+            #         key_padding_mask=key_padding_mask,
+            #         spatial_shapes=spatial_shapes,
+            #         level_start_index=level_start_index,
+            #         **kwargs)
+            #     attn_index += 1
+            #     identity = query
 
             elif layer == 'ffn':
                 query = self.ffns[ffn_index](
