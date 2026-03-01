@@ -95,10 +95,10 @@ class PerceptionTransformer(BaseModule):
         normal_(self.cams_embeds)
         xavier_init(self.can_bus_mlp, distribution='uniform', bias=0.)
 
-    @auto_fp16(apply_to=('mlvl_feats', 'bev_queries', 'prev_bev', 'bev_pos'))
+    @auto_fp16(apply_to=('current_bev_embed', 'bev_queries', 'prev_bev', 'bev_pos'))
     def get_bev_features(
             self,
-            mlvl_feats,
+            current_bev_embed,
             bev_queries,
             bev_h,
             bev_w,
@@ -110,7 +110,8 @@ class PerceptionTransformer(BaseModule):
         obtain bev features.
         """
 
-        bs = mlvl_feats[0].size(0)
+        #just assume bs = 1
+        bs = 1
         bev_queries = bev_queries.unsqueeze(1).repeat(1, bs, 1)
         bev_pos = bev_pos.flatten(2).permute(2, 0, 1)
         # obtain rotation angle and shift with ego motion
