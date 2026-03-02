@@ -279,7 +279,7 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
         self.fp16_enabled = False
         assert len(operation_order) == 6
         assert set(operation_order) == set(
-            ['self_attn', 'norm', 'cross_attn', 'ffn'])
+            ['self_attn', 'norm', 'cross_attn', 'temporal_cross_attn','ffn'])
 
     def forward(self,
                 query,
@@ -374,6 +374,25 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
             elif layer == 'norm':
                 query = self.norms[norm_index](query)
                 norm_index += 1
+
+            #temporal cross attention
+            elif layer == 'temporal_cross_attn':
+                query = self.attentions[attn_index](
+                    query,
+                    key,
+                    value,
+                    identity if self.pre_norm else None,
+                    query_pos=bev_pos,
+                    key_pos=bev_pos,
+                    attn_mask=attn_masks[attn_index],
+                    key_padding_mask=query_key_padding_mask,
+                    reference_points=ref_2d,
+                    spatial_shapes=torch.tensor(
+                        [[bev_h, bev_w]], device=query.device),
+                    level_start_index=torch.tensor([0], device=query.device),
+                    **kwargs)
+                attn_index += 1
+                identity = query
 
             # spaital cross attention
             elif layer == 'cross_attn':

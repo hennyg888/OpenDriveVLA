@@ -65,7 +65,7 @@ class Track_Map_Former(UniADTrack):
 
     def get_bevs(self, bev_embed, prev_bev=None, past_bev=None, prev_img_metas=None):
         if past_bev is not None:
-            asset prev_bev is None
+            assert prev_bev is None
             prev_bev = self.get_history_bev(past_bev, prev_img_metas)
         if self.freeze_bev_encoder:
             with torch.no_grad():
