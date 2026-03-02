@@ -69,10 +69,10 @@ class Track_Map_Former(UniADTrack):
             prev_bev = self.get_history_bev(past_bev, prev_img_metas)
         if self.freeze_bev_encoder:
             with torch.no_grad():
-                bev_embed, bev_pos = self.pts_bbox_head.get_bev_features(
+                bev_embed, bev_pos = self.pts_bbox_head.get_bev_embed_with_history(
                     current_bev_embed=bev_embed, img_metas=img_metas, prev_bev=prev_bev)
         else:
-            bev_embed, bev_pos = self.pts_bbox_head.get_bev_features(
+            bev_embed, bev_pos = self.pts_bbox_head.get_bev_embed_with_history(
                     current_bev_embed=bev_embed, img_metas=img_metas, prev_bev=prev_bev)
         
         if bev_embed.shape[1] == self.bev_h * self.bev_w:
