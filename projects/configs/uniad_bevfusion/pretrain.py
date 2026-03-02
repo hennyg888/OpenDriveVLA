@@ -254,7 +254,7 @@ model = dict(
                 use_can_bus=True,
                 embed_dims=_dim_,
                 encoder=dict(
-                    type="BEVFormerEncoder",
+                    type="BEVFusionFormerEncoder",
                     num_layers=6,
                     pc_range=point_cloud_range,
                     num_points_in_pillar=4,
@@ -263,24 +263,14 @@ model = dict(
                         type="BEVFormerLayer",
                         attn_cfgs=[
                             dict(type="TemporalSelfAttention", embed_dims=_dim_, num_levels=1),
-                            dict(
-                                type="TemporalCrossAttention",
-                                pc_range=point_cloud_range,
-                                deformable_attention=dict(
-                                    type="MSDeformableAttention3D",
-                                    embed_dims=_dim_,
-                                    num_points=8,
-                                    num_levels=_num_levels_,
-                                ),
-                                embed_dims=_dim_,
-                            ),
+                            dict(type="TemporalCrossAttention", embed_dims=_dim_, num_levels=_num_levels_),
                         ],
                         feedforward_channels=_ffn_dim_,
                         ffn_dropout=0.1,
                         operation_order=(
                             "self_attn",
                             "norm",
-                            "cross_attn",
+                            "temporal_cross_attn",
                             "norm",
                             "ffn",
                             "norm",
