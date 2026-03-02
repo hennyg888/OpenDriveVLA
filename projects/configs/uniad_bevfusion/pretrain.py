@@ -264,7 +264,7 @@ model = dict(
                         attn_cfgs=[
                             dict(type="TemporalSelfAttention", embed_dims=_dim_, num_levels=1),
                             dict(
-                                type="SpatialCrossAttention",
+                                type="TemporalCrossAttention",
                                 pc_range=point_cloud_range,
                                 deformable_attention=dict(
                                     type="MSDeformableAttention3D",
