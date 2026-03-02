@@ -161,6 +161,7 @@ class PerceptionTransformer(BaseModule):
         bev_queries = bev_queries + can_bus * self.use_can_bus
 
         #assuming current_bev_embed is same shape as prev_bev
+
         # feat_flatten = []
         # spatial_shapes = []
         # for lvl, feat in enumerate(mlvl_feats):
@@ -185,8 +186,8 @@ class PerceptionTransformer(BaseModule):
 
         bev_embed = self.encoder(
             bev_queries,
-            bev_embed,
-            bev_embed,
+            current_bev_embed,
+            current_bev_embed,
             bev_h=bev_h,
             bev_w=bev_w,
             bev_pos=bev_pos,

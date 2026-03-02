@@ -279,7 +279,7 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
         self.fp16_enabled = False
         assert len(operation_order) == 6
         assert set(operation_order) == set(
-            ['self_attn', 'norm', 'cross_attn', 'temporal_cross_attn','ffn'])
+            ['self_attn', 'norm', 'temporal_cross_attn','ffn'])
 
     def forward(self,
                 query,
@@ -394,25 +394,25 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
                 attn_index += 1
                 identity = query
 
-            # spaital cross attention
-            elif layer == 'cross_attn':
-                query = self.attentions[attn_index](
-                    query,
-                    key,
-                    value,
-                    identity if self.pre_norm else None,
-                    query_pos=query_pos,
-                    key_pos=key_pos,
-                    reference_points=ref_3d,
-                    reference_points_cam=reference_points_cam,
-                    mask=mask,
-                    attn_mask=attn_masks[attn_index],
-                    key_padding_mask=key_padding_mask,
-                    spatial_shapes=spatial_shapes,
-                    level_start_index=level_start_index,
-                    **kwargs)
-                attn_index += 1
-                identity = query
+            ## spaital cross attention
+            # elif layer == 'cross_attn':
+            #     query = self.attentions[attn_index](
+            #         query,
+            #         key,
+            #         value,
+            #         identity if self.pre_norm else None,
+            #         query_pos=query_pos,
+            #         key_pos=key_pos,
+            #         reference_points=ref_3d,
+            #         reference_points_cam=reference_points_cam,
+            #         mask=mask,
+            #         attn_mask=attn_masks[attn_index],
+            #         key_padding_mask=key_padding_mask,
+            #         spatial_shapes=spatial_shapes,
+            #         level_start_index=level_start_index,
+            #         **kwargs)
+            #     attn_index += 1
+            #     identity = query
 
             elif layer == 'ffn':
                 query = self.ffns[ffn_index](
