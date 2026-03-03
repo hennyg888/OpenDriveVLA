@@ -263,7 +263,7 @@ model = dict(
                         type="BEVFormerLayer",
                         attn_cfgs=[
                             dict(type="TemporalSelfAttention", embed_dims=_dim_, num_levels=1),
-                            dict(type="TemporalCrossAttention", embed_dims=_dim_, num_levels=_num_levels_),
+                            dict(type="TemporalCrossAttention", embed_dims=_dim_, num_levels=_num_levels_, num_bev_queue=1),
                         ],
                         feedforward_channels=_ffn_dim_,
                         ffn_dropout=0.1,
@@ -629,6 +629,8 @@ test_pipeline = [
               "gt_lane_masks",
               "gt_segmentation"],
         meta_keys=(
+            "img_shape",
+            "lidar2img",
             "camera2ego",
             "lidar2ego",
             "lidar2camera",
@@ -640,11 +642,10 @@ test_pipeline = [
             "pts_filename",
             # "transformation_3d_flow", 
             "scene_token",
-            # "can_bus",
-            # "l2g_r_mat",    
+            "can_bus",
+            "l2g_r_mat",    
         )),
 ]
-
 
 data = dict(
     samples_per_gpu=1,

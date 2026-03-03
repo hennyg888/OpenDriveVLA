@@ -125,8 +125,20 @@ class BEVFormerEncoder(TransformerLayerSequence):
         reference_points_cam = reference_points_cam[..., 0:2] / torch.maximum(
             reference_points_cam[..., 2:3], torch.ones_like(reference_points_cam[..., 2:3]) * eps)
 
-        reference_points_cam[..., 0] /= img_metas[0]['img_shape'][0][1]
-        reference_points_cam[..., 1] /= img_metas[0]['img_shape'][0][0]
+        # reference_points_cam[..., 0] /= img_metas[0]['img_shape'][0][1]
+        # reference_points_cam[..., 1] /= img_metas[0]['img_shape'][0][0]
+
+        # Handle img_shape format differences between training and testing
+        img_shape = img_metas[0]['img_shape']
+        if isinstance(img_shape[0], (list, tuple)):
+            # Training format: [(H,W), (H,W), ...] for multiple cameras
+            img_h, img_w = img_shape[0][0], img_shape[0][1]
+        else:
+            # Test format: (H, W) single tuple
+            img_h, img_w = img_shape[0], img_shape[1]
+
+        reference_points_cam[..., 0] /= img_w
+        reference_points_cam[..., 1] /= img_h
 
         bev_mask = (bev_mask & (reference_points_cam[..., 1:2] > 0.0)
                     & (reference_points_cam[..., 1:2] < 1.0)
@@ -377,10 +389,18 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
 
             #temporal cross attention
             elif layer == 'temporal_cross_attn':
+                # TemporalCrossAttention expects batch_first format but value is in [num_query, bs, embed_dims]
+                # Need to convert value to batch_first before passing
+                if value is not None and value.dim() == 3 and value.shape[1] == 1:
+                    # value is [num_query, bs, embed_dims], convert to [bs, num_query, embed_dims]
+                    value_for_temporal = value.permute(1, 0, 2)
+                else:
+                    value_for_temporal = value
+                
                 query = self.attentions[attn_index](
                     query,
                     key,
-                    value,
+                    value_for_temporal,
                     identity if self.pre_norm else None,
                     query_pos=bev_pos,
                     key_pos=bev_pos,

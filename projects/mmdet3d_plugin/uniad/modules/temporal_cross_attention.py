@@ -180,7 +180,10 @@ class TemporalCrossAttention(BaseModule):
         if value is None:
             assert self.batch_first
             bs, len_bev, c = query.shape
-            value = torch.stack([query, query], 1).reshape(bs*2, len_bev, c)
+            if self.num_bev_queue == 1:
+                value = query
+            else:
+                value = torch.stack([query, query], 1).reshape(bs*self.num_bev_queue, len_bev, c)
 
         if identity is None:
             identity = query
@@ -192,10 +195,14 @@ class TemporalCrossAttention(BaseModule):
             value = value.permute(1, 0, 2)
         bs,  num_query, embed_dims = query.shape
         _, num_value, _ = value.shape
+        
         assert (spatial_shapes[:, 0] * spatial_shapes[:, 1]).sum() == num_value
-        assert self.num_bev_queue == 2
+        # assert self.num_bev_queue == 2
 
-        query = torch.cat([value[:bs], query], -1)
+        if self.num_bev_queue == 1:
+            query = query
+        else:
+            query = torch.cat([value[:bs], query], -1)
         value = self.value_proj(value)
 
         if key_padding_mask is not None:
@@ -259,8 +266,11 @@ class TemporalCrossAttention(BaseModule):
 
         # fuse history value and current value
         # (num_query, embed_dims, bs*num_bev_queue)-> (num_query, embed_dims, bs, num_bev_queue)
-        output = output.view(num_query, embed_dims, bs, self.num_bev_queue)
-        output = output.mean(-1)
+        if self.num_bev_queue > 1:
+            output = output.view(num_query, embed_dims, bs, self.num_bev_queue)
+            output = output.mean(-1)
+        else:
+            output = output.view(num_query, embed_dims, bs)
 
         # (num_query, embed_dims, bs)-> (bs, num_query, embed_dims)
         output = output.permute(2, 0, 1)

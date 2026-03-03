@@ -56,14 +56,16 @@ class Track_Map_Former(UniADTrack):
             for i in range(len_queue):
                 img_metas = [each[i] for each in img_metas_list]
                 this_bev_embed = bev_embeds_queue[i]
-                prev_bev, _ = self.pts_bbox_head.get_bev_features(
+                # Convert [C, H, W] to [H*W, 1, C] for get_bev_embed_with_history
+                this_bev_embed = this_bev_embed.flatten(1).permute(1, 0).unsqueeze(1)  # [C, H*W] -> [H*W, C] -> [H*W, 1, C]
+                prev_bev, _ = self.pts_bbox_head.get_bev_embed_with_history(
                     current_bev_embed=this_bev_embed, 
                     img_metas=img_metas, 
                     prev_bev=prev_bev)
         self.train()
         return prev_bev
 
-    def get_bevs(self, bev_embed, prev_bev=None, past_bev=None, prev_img_metas=None):
+    def get_bevs(self, bev_embed, img_metas, prev_bev=None, past_bev=None, prev_img_metas=None):
         if past_bev is not None:
             assert prev_bev is None
             prev_bev = self.get_history_bev(past_bev, prev_img_metas)
@@ -116,6 +118,7 @@ class Track_Map_Former(UniADTrack):
         if past_bev is not None:
             bev_embed = self.get_bevs(
                 bev_embed,
+                img_metas,
                 past_bev=past_bev,
                 prev_img_metas=prev_img_metas
             )
@@ -256,6 +259,15 @@ class Track_Map_Former(UniADTrack):
             # img_single = torch.stack([img_[i] for img_ in img], dim=0)
             #bev_embeds do not contain history
             past_bev = bev_embed[:i, ...] if i != 0 else None
+            
+            # Convert past_bev from [i, H*W, 1, C] to [1, i, C, H, W] for get_history_bev
+            if past_bev is not None:
+                len_queue, num_query, bs, embed_dims = past_bev.shape
+                H = self.pts_bbox_head.bev_h
+                W = self.pts_bbox_head.bev_w
+                # [i, H*W, 1, C] -> [i, H*W, C] -> [i, C, H*W] -> [i, C, H, W] -> [1, i, C, H, W]
+                past_bev = past_bev.squeeze(2).permute(0, 2, 1).reshape(len_queue, embed_dims, H, W).unsqueeze(0)
+            
             prev_img_metas = copy.deepcopy(img_metas)
             img_metas_single = [copy.deepcopy(img_metas[0][i])]
             if i == num_frame - 1:
@@ -396,7 +408,7 @@ class Track_Map_Former(UniADTrack):
         #getting bev_embed directly from bevfusion now
         #print("track_instances.query: ", track_instances.query)
         #print("track_instances.ref_pts: ", track_instances.ref_pts)
-        bev_embed = self.get_bevs(bev_embed, prev_bev=prev_bev)
+        bev_embed = self.get_bevs(bev_embed, img_metas, prev_bev=prev_bev)
 
         det_output = self.pts_bbox_head.get_detections(
             bev_embed, 
@@ -501,7 +513,7 @@ class Track_Map_Former(UniADTrack):
             print("*****WARNING starting new track WARNING*****")
             self.timestamp = timestamp
             self.scene_token = img_metas[0]["scene_token"]
-            #self.prev_bev = None
+            self.prev_bev = None
             track_instances = self._generate_empty_tracks()
             time_delta, l2g_r1, l2g_t1, l2g_r2, l2g_t2 = None, None, None, None, None
         else:
