@@ -221,8 +221,8 @@ model = dict(
             code_weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2],
             assigner=dict(
                 type="HungarianAssigner3DTrack",
-                cls_cost=dict(type="FocalLossCost", weight=2.0),
-                reg_cost=dict(type="BBox3DL1Cost", weight=0.25),
+                cls_cost=dict(type="FocalLossCost", weight=4.0),
+                reg_cost=dict(type="BBox3DL1Cost", weight=0.5),
                 pc_range=point_cloud_range,
             ),
             loss_cls=dict(
@@ -230,9 +230,9 @@ model = dict(
                 use_sigmoid=True,
                 gamma=2.0,
                 alpha=0.25,
-                loss_weight=2.0,
+                loss_weight=4.0,
             ),
-            loss_bbox=dict(type="L1Loss", loss_weight=0.25),
+            loss_bbox=dict(type="L1Loss", loss_weight=0.5),
             loss_past_traj_weight=0.0,
         ),
         pts_bbox_head=dict(
@@ -328,9 +328,9 @@ model = dict(
                 use_sigmoid=True,
                 gamma=2.0,
                 alpha=0.25,
-                loss_weight=2.0,
+                loss_weight=4.0,
             ),
-            loss_bbox=dict(type="L1Loss", loss_weight=0.25),
+            loss_bbox=dict(type="L1Loss", loss_weight=0.5),
             loss_iou=dict(type="GIoULoss", loss_weight=0.0),
         ),
         seg_head=dict(
@@ -441,8 +441,8 @@ model = dict(
             out_size_factor=4,
             assigner=dict(
                 type="HungarianAssigner3D",
-                cls_cost=dict(type="FocalLossCost", weight=2.0),
-                reg_cost=dict(type="BBox3DL1Cost", weight=0.25),
+                cls_cost=dict(type="FocalLossCost", weight=4.0),
+                reg_cost=dict(type="BBox3DL1Cost", weight=0.5),
                 iou_cost=dict(
                     type="IoUCost", weight=0.0
                 ),  # Fake cost. This is just to make it compatible with DETR head.
