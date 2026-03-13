@@ -356,6 +356,9 @@ class BEVFusion(Base3DFusionModel):
         x = self.decoder["backbone"](x)
         x = self.decoder["neck"](x)
 
+        if self.heads is None:
+            return x[0], camera_features
+
         if self.training:
             outputs = {}
             for type, head in self.heads.items():

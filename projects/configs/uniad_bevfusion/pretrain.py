@@ -9,7 +9,7 @@ bevfusion_voxel_size = [0.075, 0.075, 0.2]
 point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
 voxel_size = [0.2, 0.2, 8]
 patch_size = [102.4, 102.4]
-_dim_ = 256
+_dim_ = 512
 _pos_dim_ = _dim_ // 2
 _ffn_dim_ = _dim_ * 2
 _num_levels_ = 4
@@ -185,6 +185,28 @@ model = dict(
             ),
         ),
         fuser=dict(type="ConvFuser", in_channels=[80, 256], out_channels=256),
+
+        decoder=dict(
+            backbone=dict(
+                type='SECOND',
+                in_channels=256,
+                out_channels=[128, 256],
+                layer_nums=[5, 5],
+                layer_strides=[1, 2],
+                norm_cfg=dict(type='BN2d', eps=1e-3, momentum=0.01),
+                conv_cfg=dict(type='Conv2d', bias=False)
+            ),
+            
+            neck=dict(
+                type='SECONDFPN',
+                in_channels=[128, 256],
+                out_channels=[256, 256],
+                upsample_strides=[1, 2],
+                norm_cfg=dict(type='BN2d', eps=1e-3, momentum=0.01),
+                upsample_cfg=dict(type='deconv', bias=False),
+                use_conv_for_no_stride=True
+            )
+        ),
     ),
     track_map_former=dict(
         type="Track_Map_Former",
@@ -276,7 +298,15 @@ model = dict(
                             ),
                         ],
                         feedforward_channels=_ffn_dim_,
-                        ffn_dropout=0.1,
+                        # ffn_dropout=0.1,
+                        ffn_cfgs=dict(
+                            type='FFN',
+                            embed_dims=_dim_,
+                            feedforward_channels=_ffn_dim_,
+                            num_fcs=2,
+                            ffn_drop=0.1,
+                            act_cfg=dict(type='ReLU', inplace=True),
+                        ),
                         operation_order=(
                             "self_attn",
                             "norm",
@@ -307,7 +337,15 @@ model = dict(
                             ),
                         ],
                         feedforward_channels=_ffn_dim_,
-                        ffn_dropout=0.1,
+                        # ffn_dropout=0.1,
+                        ffn_cfgs=dict(
+                            type='FFN',
+                            embed_dims=_dim_,
+                            feedforward_channels=_ffn_dim_,
+                            num_fcs=2,
+                            ffn_drop=0.1,
+                            act_cfg=dict(type='ReLU', inplace=True),
+                        ),
                         operation_order=(
                             "self_attn",
                             "norm",
@@ -370,7 +408,15 @@ model = dict(
                             num_levels=_num_levels_,
                         ),
                         feedforward_channels=_feed_dim_,
-                        ffn_dropout=0.1,
+                        # ffn_dropout=0.1,
+                        ffn_cfgs=dict(
+                            type='FFN',
+                            embed_dims=_dim_,
+                            feedforward_channels=_feed_dim_,
+                            num_fcs=2,
+                            ffn_drop=0.1,
+                            act_cfg=dict(type='ReLU', inplace=True),
+                        ),
                         operation_order=("self_attn", "norm", "ffn", "norm"),
                     ),
                 ),
@@ -394,7 +440,15 @@ model = dict(
                             ),
                         ],
                         feedforward_channels=_feed_dim_,
-                        ffn_dropout=0.1,
+                        # ffn_dropout=0.1,
+                        ffn_cfgs=dict(
+                            type='FFN',
+                            embed_dims=_dim_,
+                            feedforward_channels=_feed_dim_,
+                            num_fcs=2,
+                            ffn_drop=0.1,
+                            act_cfg=dict(type='ReLU', inplace=True),
+                        ),
                         operation_order=(
                             "self_attn",
                             "norm",
