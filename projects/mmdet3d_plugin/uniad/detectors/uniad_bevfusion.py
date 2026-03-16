@@ -1,4 +1,5 @@
 import torch
+import torch.utils.checkpoint
 from collections import OrderedDict
 import torch.distributed as dist
 from torch import nn
@@ -22,6 +23,7 @@ class UniADBevFusion(nn.Module):
         bev_out_hw=200,
         freeze_bevfusion=False,
         freeze_bevfusion_bn=False,
+        use_checkpoint=True,
         train_cfg=None,
         test_cfg=None,
         **kwargs,
@@ -31,6 +33,7 @@ class UniADBevFusion(nn.Module):
         self.test_cfg = test_cfg
         self.freeze_bevfusion = freeze_bevfusion
         self.freeze_bevfusion_bn = freeze_bevfusion_bn
+        self.use_checkpoint = use_checkpoint
         self.bev_in_hw = bev_in_hw
         self.bev_out_hw = bev_out_hw
         # Use bilinear interpolation instead of linear layer to save memory
@@ -59,11 +62,18 @@ class UniADBevFusion(nn.Module):
 
     def train(self, mode=True):
         super().train(mode)
-        if self.freeze_bevfusion and self.bevfusion is not None:
-            if self.freeze_bevfusion_bn:
+        if self.bevfusion is not None:
+            if self.freeze_bevfusion:
                 self.bevfusion.eval()
-            else:
-                self.bevfusion.train(False)
+            elif self.freeze_bevfusion_bn:
+                for m in self.bevfusion.modules():
+                    if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d,
+                                      nn.SyncBatchNorm)):
+                        m.eval()
+                        if m.weight is not None:
+                            m.weight.requires_grad = False
+                        if m.bias is not None:
+                            m.bias.requires_grad = False
         return self
 
     def _freeze_bevfusion(self):
@@ -391,7 +401,7 @@ class UniADBevFusion(nn.Module):
         if self.freeze_bevfusion and img is not None:
             img = img.detach()
         
-        bev_feats = []
+        bev_feat_all = None
         
         # Extract metas_map for multi-frame indexing
         # img_metas is typically [metas_map] where metas_map = {0: meta0, 1: meta1, ...}
@@ -444,37 +454,98 @@ class UniADBevFusion(nn.Module):
             else:
                 cur_img_metas = img_metas if i == 0 else None  # fallback
             
-            bev_feat, _ = self.extract_feat(
-                img=cur_img,
-                points=cur_points,
-                camera2ego=camera2ego[i],
-                lidar2ego=lidar2ego[i],
-                lidar2camera=lidar2camera[i],
-                lidar2image=lidar2image[i],
-                camera_intrinsics=camera_intrinsics[i],
-                camera2lidar=camera2lidar[i],
-                img_aug_matrix=img_aug_matrix[i],
-                lidar_aug_matrix=lidar_aug_matrix[i],
-                img_metas=cur_img_metas,
-                depths=depths[i] if depths is not None else None,
-                radar=radar[i] if radar is not None else None,
-                gt_bboxes_3d=gt_bboxes_3d_unwrapped[i] if gt_bboxes_3d_unwrapped is not None else None,
-                gt_labels_3d=gt_labels_3d_unwrapped[i] if gt_labels_3d_unwrapped is not None else None,
-                **kwargs,
-            )
+            _depths_i = depths[i] if depths is not None else None
+            _radar_i = radar[i] if radar is not None else None
+            _gt_bboxes_i = gt_bboxes_3d_unwrapped[i] if gt_bboxes_3d_unwrapped is not None else None
+            _gt_labels_i = gt_labels_3d_unwrapped[i] if gt_labels_3d_unwrapped is not None else None
+
+            if not self.freeze_bevfusion and self.use_checkpoint:
+                # Gradient checkpointing: discard intermediate activations during forward,
+                # recompute them on-the-fly during backward. Trades ~30% extra compute for
+                # significant activation memory reduction (proportional to BEVFusion depth).
+                #
+                # IMPORTANT: use default-argument binding to snapshot per-iteration values.
+                # Python closures capture variables by reference, not by value; without this
+                # the backward-pass recomputation (which runs after the loop) would use the
+                # last iteration's non-tensor args for every frame, producing wrong gradients.
+                def _ckpt_extract(
+                    img, cam2ego, l2e, l2c, l2i, ci, c2l, iam, lam,
+                    _pts=cur_points,
+                    _metas=cur_img_metas,
+                    _dep=_depths_i,
+                    _rad=_radar_i,
+                    _gt_b=_gt_bboxes_i,
+                    _gt_l=_gt_labels_i,
+                    _kw=kwargs,
+                ):
+                    bev, img2d = self.extract_feat(
+                        img=img,
+                        points=_pts,
+                        camera2ego=cam2ego,
+                        lidar2ego=l2e,
+                        lidar2camera=l2c,
+                        lidar2image=l2i,
+                        camera_intrinsics=ci,
+                        camera2lidar=c2l,
+                        img_aug_matrix=iam,
+                        lidar_aug_matrix=lam,
+                        img_metas=_metas,
+                        depths=_dep,
+                        radar=_rad,
+                        gt_bboxes_3d=_gt_b,
+                        gt_labels_3d=_gt_l,
+                        **_kw,
+                    )
+                    # checkpoint requires all outputs to be tensors
+                    if img2d is None:
+                        img2d = bev.new_zeros(1)
+                    return bev, img2d
+
+                bev_feat, _ = torch.utils.checkpoint.checkpoint(
+                    _ckpt_extract,
+                    cur_img,
+                    camera2ego[i], lidar2ego[i], lidar2camera[i], lidar2image[i],
+                    camera_intrinsics[i], camera2lidar[i], img_aug_matrix[i], lidar_aug_matrix[i],
+                    # use_reentrant=True: skip shape-consistency check on recomputation.
+                    # use_reentrant=False would require the function to be fully deterministic,
+                    # but BEVFusion's LiDAR voxelization produces dynamic-sized tensors
+                    # (variable number of occupied voxels), which fails that check.
+                    use_reentrant=True,
+                )
+            else:
+                bev_feat, _ = self.extract_feat(
+                    img=cur_img,
+                    points=cur_points,
+                    camera2ego=camera2ego[i],
+                    lidar2ego=lidar2ego[i],
+                    lidar2camera=lidar2camera[i],
+                    lidar2image=lidar2image[i],
+                    camera_intrinsics=camera_intrinsics[i],
+                    camera2lidar=camera2lidar[i],
+                    img_aug_matrix=img_aug_matrix[i],
+                    lidar_aug_matrix=lidar_aug_matrix[i],
+                    img_metas=cur_img_metas,
+                    depths=_depths_i,
+                    radar=_radar_i,
+                    gt_bboxes_3d=_gt_bboxes_i,
+                    gt_labels_3d=_gt_labels_i,
+                    **kwargs,
+                )
             # extract_feat returns [1, C, H, W], remove batch dim for stacking
             if bev_feat.dim() == 4 and bev_feat.shape[0] == 1:
                 bev_feat = bev_feat.squeeze(0)  # [C, H, W]
-            bev_feats.append(bev_feat)
+                
+            if bev_feat_all is None:
+                bev_feat_all = bev_feat.new_zeros(queue_len, *bev_feat.shape)
+            
+            bev_feat_all[i] = bev_feat
             
             # Clear intermediate variables to free memory
             del cur_img, cur_points
 
         # Stack: [queue_length, C, H, W]
-        bev_feat = torch.stack(bev_feats, dim=0)
+        bev_feat = bev_feat_all
         
-        # Delete intermediate list immediately
-        del bev_feats
         
         # Clear cache to free memory after BEVFusion forward (BEVFusion is freeze and detached)
         if torch.cuda.is_available():
@@ -490,7 +561,8 @@ class UniADBevFusion(nn.Module):
         
         # Keep in FP32 for numerical stability (FP16 causes NaN in loss)
         bev_embed = bev_embed.contiguous()
-
+        # if not self.freeze_bevfusion:
+        #     assert (not self.freeze_bevfusion) == bev_embed.requires_grad
         if self.track_map_former is None:
             raise RuntimeError("track_map_former is required for forward_train.")
 
