@@ -47,7 +47,8 @@ class PerceptionTransformer(BaseModule):
                  rotate_center=[100, 100],
                  **kwargs):
         super(PerceptionTransformer, self).__init__(**kwargs)
-        self.encoder = build_transformer_layer_sequence(encoder)
+        if encoder is not None:
+            self.encoder = build_transformer_layer_sequence(encoder)
         self.decoder = build_transformer_layer_sequence(decoder)
         self.embed_dims = embed_dims
         self.num_feature_levels = num_feature_levels
@@ -184,19 +185,23 @@ class PerceptionTransformer(BaseModule):
         # feat_flatten = feat_flatten.permute(
         #     0, 2, 1, 3)  # (num_cam, H*W, bs, embed_dims)
 
-        bev_embed = self.encoder(
-            bev_queries,
-            current_bev_embed,
-            current_bev_embed,
-            bev_h=bev_h,
-            bev_w=bev_w,
-            bev_pos=bev_pos,
-            # spatial_shapes=spatial_shapes,
-            # level_start_index=level_start_index,
-            prev_bev=prev_bev,
-            shift=shift,
-            img_metas=img_metas,
-        )
+        # Guard: encoder is None when using external_bev (e.g. UniADUniBEV)
+        if hasattr(self, 'encoder'):
+            bev_embed = self.encoder(
+                bev_queries,
+                current_bev_embed,
+                current_bev_embed,
+                bev_h=bev_h,
+                bev_w=bev_w,
+                bev_pos=bev_pos,
+                # spatial_shapes=spatial_shapes,
+                # level_start_index=level_start_index,
+                prev_bev=prev_bev,
+                shift=shift,
+                img_metas=img_metas,
+            )
+        else:
+            bev_embed = current_bev_embed
 
         return bev_embed
 
@@ -210,7 +215,8 @@ class PerceptionTransformer(BaseModule):
             grid_length=[0.512, 0.512],
             bev_pos=None,
             prev_bev=None,
-            img_metas=None):
+            img_metas=None,
+            pts_feats=None):
         """
         obtain bev features.
         """
@@ -286,19 +292,38 @@ class PerceptionTransformer(BaseModule):
         feat_flatten = feat_flatten.permute(
             0, 2, 1, 3)  # (num_cam, H*W, bs, embed_dims)
 
-        bev_embed = self.encoder(
-            bev_queries,
-            feat_flatten,
-            feat_flatten,
-            bev_h=bev_h,
-            bev_w=bev_w,
-            bev_pos=bev_pos,
-            spatial_shapes=spatial_shapes,
-            level_start_index=level_start_index,
-            prev_bev=prev_bev,
-            shift=shift,
-            img_metas=img_metas,
-        )
+        if pts_feats is not None:
+            bs, c, h, w = pts_feats.shape
+            pts_feat_flatten = pts_feats.flatten(2).permute(0, 2, 1)  # (bs, H*W, embed_dims)
+            pts_spatial_shapes = torch.as_tensor(
+                [(h, w)], dtype=torch.long, device=bev_pos.device)
+            pts_level_start_index = torch.cat((pts_spatial_shapes.new_zeros(
+                (1,)), pts_spatial_shapes.prod(1).cumsum(0)[:-1]))
+        else:
+            pts_feat_flatten = None
+            pts_spatial_shapes = None
+            pts_level_start_index = None
+
+        # Guard: encoder is None when using external_bev (e.g. UniADUniBEV)
+        if hasattr(self, 'encoder'):
+            bev_embed = self.encoder(
+                bev_queries,
+                feat_flatten,
+                feat_flatten,
+                bev_h=bev_h,
+                bev_w=bev_w,
+                bev_pos=bev_pos,
+                spatial_shapes=spatial_shapes,
+                level_start_index=level_start_index,
+                prev_bev=prev_bev,
+                shift=shift,
+                img_metas=img_metas,
+                pts_feats=pts_feat_flatten,
+                pts_spatial_shapes=pts_spatial_shapes,
+                pts_level_start_index=pts_level_start_index,
+            )
+        else:
+            bev_embed = bev_queries
 
         return bev_embed
     
@@ -308,7 +333,7 @@ class PerceptionTransformer(BaseModule):
         object_query_embed,
         bev_h,
         bev_w,
-        reference_points,
+        reference_points=None,
         reg_branches=None,
         cls_branches=None,
         img_metas=None
@@ -319,9 +344,11 @@ class PerceptionTransformer(BaseModule):
         query_pos = query_pos.unsqueeze(0).expand(bs, -1, -1)
         query = query.unsqueeze(0).expand(bs, -1, -1)
 
-        reference_points = reference_points.unsqueeze(0).expand(bs, -1, -1)
+        if reference_points is not None:
+            reference_points = reference_points.unsqueeze(0).expand(bs, -1, -1)
+        else:
+            reference_points = query_pos  # fallback: use query_pos as reference
         reference_points = reference_points.sigmoid()
-
         init_reference_out = reference_points
         query = query.permute(1, 0, 2)
         query_pos = query_pos.permute(1, 0, 2)

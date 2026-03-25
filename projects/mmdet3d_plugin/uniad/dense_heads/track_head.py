@@ -129,6 +129,8 @@ class BEVFormerTrackHead(DETRHead):
         if not self.as_two_stage:
             self.bev_embedding = nn.Embedding(
                 self.bev_h * self.bev_w, self.embed_dims)
+            self.query_embedding = nn.Embedding(self.num_query,
+                                                self.embed_dims * 2)
 
     def init_weights(self):
         """Initialize weights of the DeformDETR head."""
@@ -161,7 +163,7 @@ class BEVFormerTrackHead(DETRHead):
         )
         return bev_embed, bev_pos
     
-    def get_bev_features(self, mlvl_feats, img_metas, prev_bev=None, external_bev=None):
+    def get_bev_features(self, mlvl_feats, img_metas, prev_bev=None, external_bev=None, pts_feats=None):
         if external_bev is not None:
             if external_bev.dim() == 4:
                 B, C, H, W = external_bev.shape
@@ -170,7 +172,7 @@ class BEVFormerTrackHead(DETRHead):
                 bev_embed = external_bev
             bev_pos = None
             return bev_embed, bev_pos
-        
+
         bs, num_cam, _, _, _ = mlvl_feats[0].shape
         dtype = mlvl_feats[0].dtype
         bev_queries = self.bev_embedding.weight.to(dtype)
@@ -188,6 +190,7 @@ class BEVFormerTrackHead(DETRHead):
             bev_pos=bev_pos,
             prev_bev=prev_bev,
             img_metas=img_metas,
+            pts_feats=pts_feats,
         )
         return bev_embed, bev_pos
 
