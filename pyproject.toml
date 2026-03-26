@@ -42,7 +42,7 @@ train = [
     "accelerate==0.29.3",
     "tokenizers~=0.15.2",
     "transformers@git+https://github.com/huggingface/transformers.git@1c39974a4c4036fd641bc1191cc32799f85715a4",
-    "flash-attn==2.5.7",
+    #"flash-attn==2.5.7",
     "bitsandbytes==0.41.0",
     "scikit-learn==1.2.2",
     "sentencepiece~=0.1.99",

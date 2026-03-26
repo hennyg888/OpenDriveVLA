@@ -105,6 +105,7 @@ model = dict(
     type="UniADBevFusion",
     freeze_bevfusion=False,
     freeze_bevfusion_bn=False,
+    freeze_bevfusion_encoders=True,
     bev_in_hw=180,
     bev_out_hw=200,
     bevfusion=dict(
@@ -822,7 +823,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity="s56cai-university-of-waterloo",
                 project="uniad_bevfusion",
-                name="pretrain_decoder",
+                name="pretrain_freeze_encoder",
                 tags=["bevfusion_backbone", "track_map_former", "pretrain"],
             ),
             log_artifact=True,

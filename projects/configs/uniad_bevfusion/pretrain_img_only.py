@@ -103,7 +103,7 @@ occ_n_future_max = max([occ_n_future, occ_n_future_plan])
 
 model = dict(
     type="UniADBevFusion",
-    freeze_bevfusion=False,
+    freeze_bevfusion=True,
     freeze_bevfusion_bn=False,
     bev_in_hw=180,
     bev_out_hw=200,
@@ -822,7 +822,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity="s56cai-university-of-waterloo",
                 project="uniad_bevfusion",
-                name="pretrain_decoder",
+                name="pretrain_img_only",
                 tags=["bevfusion_backbone", "track_map_former", "pretrain"],
             ),
             log_artifact=True,

@@ -23,6 +23,7 @@ class UniADBevFusion(nn.Module):
         bev_out_hw=200,
         freeze_bevfusion=False,
         freeze_bevfusion_bn=False,
+        freeze_bevfusion_encoders=False,
         use_checkpoint=True,
         train_cfg=None,
         test_cfg=None,
@@ -33,6 +34,7 @@ class UniADBevFusion(nn.Module):
         self.test_cfg = test_cfg
         self.freeze_bevfusion = freeze_bevfusion
         self.freeze_bevfusion_bn = freeze_bevfusion_bn
+        self.freeze_bevfusion_encoders = freeze_bevfusion_encoders
         self.use_checkpoint = use_checkpoint
         self.bev_in_hw = bev_in_hw
         self.bev_out_hw = bev_out_hw
@@ -52,6 +54,9 @@ class UniADBevFusion(nn.Module):
 
         if self.freeze_bevfusion:
             self._freeze_bevfusion()
+        
+        if self.freeze_bevfusion_encoders and self.bevfusion is not None:
+            self._freeze_bevfusion_encoders()
 
     def init_weights(self):
         if self.bevfusion is not None:
@@ -74,6 +79,8 @@ class UniADBevFusion(nn.Module):
                             m.weight.requires_grad = False
                         if m.bias is not None:
                             m.bias.requires_grad = False
+            elif self.freeze_bevfusion_encoders:
+                self.bevfusion.encoders.eval()
         return self
 
     def _freeze_bevfusion(self):
@@ -81,6 +88,13 @@ class UniADBevFusion(nn.Module):
             self.bevfusion.eval()
         for param in self.bevfusion.parameters():
             param.requires_grad = False
+    
+    def _freeze_bevfusion_encoders(self):
+        if self.freeze_bevfusion_encoders and self.bevfusion is not None:
+            self.bevfusion.encoders.eval()
+            for param in self.bevfusion.encoders.parameters():
+                #print( f"Freezing BEVFusion encoder parameter: {name}, shape: {param.shape}")
+                param.requires_grad = False
 
     def _resize_bev_feat(self, bev_feat):
         """
@@ -255,6 +269,16 @@ class UniADBevFusion(nn.Module):
         # Single parameters: just single tensors, _to_BN44 will handle conversion to [B, 4, 4]
         lidar2ego = to_tensor(lidar2ego)
         lidar_aug_matrix = to_tensor(lidar_aug_matrix)
+
+        #WARNING, zeroing out points inputs
+        # if isinstance(points, torch.Tensor):
+        #     points = torch.zeros_like(points)
+        # elif isinstance(points, list):
+        #     #print(points)
+        #     points = [
+        #         torch.zeros_like(p) if isinstance(p, torch.Tensor) else p
+        #         for p in points
+        #     ]
 
         if self.freeze_bevfusion:
             with torch.no_grad():

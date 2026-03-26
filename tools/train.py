@@ -213,7 +213,7 @@ def main():
     model.init_weights()
 
     # Only load BEVFusion checkpoint after init_weights
-    bevfusion_ckpt = "/home/s56cai/ckpt/bevfusion/bevfusion-det.pth"
+    bevfusion_ckpt = "/home/hhguo/ckpt/bevfusion/bevfusion-det.pth"
     if hasattr(model, "bevfusion") and model.bevfusion is not None:
         load_checkpoint(model.bevfusion, bevfusion_ckpt, map_location="cpu", strict=False)
 
