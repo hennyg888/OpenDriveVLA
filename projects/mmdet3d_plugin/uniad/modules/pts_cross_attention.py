@@ -1,270 +1,249 @@
-import argparse
-import logging
+# ---------------------------------------------
+# Copyright (c) OpenMMLab. All rights reserved.
+# ---------------------------------------------
+#  Modified by Zhiqi Li
+# ---------------------------------------------
+# Modifications:
+# - Modified by FusionAD on 2023.5
+# - Added extended support from FusionAD (https://arxiv.org/abs/2308.01006)
 
-import cv2
-import torch
-import sklearn
+from mmcv.ops.multi_scale_deform_attn import multi_scale_deformable_attn_pytorch
 import mmcv
-import os
+import cv2 as cv
+import copy
 import warnings
-from mmcv import Config, DictAction
-from mmcv.cnn import fuse_conv_bn
-from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
-from mmcv.runner import (get_dist_info, init_dist, load_checkpoint,
-                         wrap_fp16_model)
+from matplotlib import pyplot as plt
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from mmcv.cnn import xavier_init, constant_init
+from mmcv.cnn.bricks.registry import (ATTENTION,
+                                      TRANSFORMER_LAYER_SEQUENCE)
+from mmcv.cnn.bricks.transformer import TransformerLayerSequence
+import math
+from mmcv.runner.base_module import BaseModule, ModuleList, Sequential
+from mmcv.utils import (ConfigDict, build_from_cfg, deprecated_api_warning,
+                        to_2tuple)
 
-from mmdet3d.apis import single_gpu_test
-from mmdet3d.datasets import build_dataset
-from projects.mmdet3d_plugin.datasets.builder import build_dataloader
-from mmdet3d.models import build_model
-from mmdet.apis import set_random_seed
-from projects.mmdet3d_plugin.uniad.apis.test import custom_multi_gpu_test
-from mmdet.datasets import replace_ImageToTensor
-import time
-import os.path as osp
+from mmcv.utils import ext_loader
+from .multi_scale_deformable_attn_function import MultiScaleDeformableAttnFunction_fp32, \
+    MultiScaleDeformableAttnFunction_fp16
 
-warnings.filterwarnings("ignore")
-
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description='MMDet test (and eval) a model')
-    parser.add_argument('config', help='test config file path')
-    parser.add_argument('checkpoint', help='checkpoint file')
-    parser.add_argument('--out', default='output/results.pkl', help='output result file in pickle format')
-    parser.add_argument(
-        '--fuse-conv-bn',
-        action='store_true',
-        help='Whether to fuse conv and bn, this will slightly increase'
-        'the inference speed')
-    parser.add_argument(
-        '--format-only',
-        action='store_true',
-        help='Format the output results without perform evaluation. It is'
-        'useful when you want to format the result to a specific format and '
-        'submit it to the test server')
-    parser.add_argument(
-        '--eval',
-        type=str,
-        nargs='+',
-        help='evaluation metrics, which depends on the dataset, e.g., "bbox",'
-        ' "segm", "proposal" for COCO, and "mAP", "recall" for PASCAL VOC')
-    parser.add_argument('--show', action='store_true', help='show results')
-    parser.add_argument(
-        '--show-dir', help='directory where results will be saved')
-    parser.add_argument(
-        '--gpu-collect',
-        action='store_true',
-        help='whether to use gpu to collect results.')
-    parser.add_argument(
-        '--tmpdir',
-        help='tmp directory used for collecting results from multiple '
-        'workers, available when gpu-collect is not specified')
-    parser.add_argument('--seed', type=int, default=0, help='random seed')
-    parser.add_argument(
-        '--deterministic',
-        action='store_true',
-        help='whether to set deterministic options for CUDNN backend.')
-    parser.add_argument(
-        '--cfg-options',
-        nargs='+',
-        action=DictAction,
-        help='override some settings in the used config, the key-value pair '
-        'in xxx=yyy format will be merged into config file. If the value to '
-        'be overwritten is a list, it should be like key="[a,b]" or key=a,b '
-        'It also allows nested list/tuple values, e.g. key="[(a,b),(c,d)]" '
-        'Note that the quotation marks are necessary and that no white space '
-        'is allowed.')
-    parser.add_argument(
-        '--options',
-        nargs='+',
-        action=DictAction,
-        help='custom options for evaluation, the key-value pair in xxx=yyy '
-        'format will be kwargs for dataset.evaluate() function (deprecate), '
-        'change to --eval-options instead.')
-    parser.add_argument(
-        '--eval-options',
-        nargs='+',
-        action=DictAction,
-        help='custom options for evaluation, the key-value pair in xxx=yyy '
-        'format will be kwargs for dataset.evaluate() function')
-    parser.add_argument(
-        '--launcher',
-        choices=['none', 'pytorch', 'slurm', 'mpi'],
-        default='none',
-        help='job launcher')
-    parser.add_argument('--local-rank', '--local_rank', type=int, default=0)
-    parser.add_argument('--result_file', type=str, default=None)
-    args = parser.parse_args()
-    if 'LOCAL_RANK' not in os.environ:
-        os.environ['LOCAL_RANK'] = str(args.local_rank)
-
-    if args.options and args.eval_options:
-        raise ValueError(
-            '--options and --eval-options cannot be both specified, '
-            '--options is deprecated in favor of --eval-options')
-    if args.options:
-        warnings.warn('--options is deprecated in favor of --eval-options')
-        args.eval_options = args.options
-    return args
+ext_module = ext_loader.load_ext(
+    '_ext', ['ms_deform_attn_backward', 'ms_deform_attn_forward'])
 
 
-def main():
-    args = parse_args()
+@ATTENTION.register_module()
+class PtsCrossAttention(BaseModule):
+    """An attention module used in Deformable-Detr.
 
-    assert args.out or args.eval or args.format_only or args.show \
-        or args.show_dir, \
-        ('Please specify at least one operation (save/eval/format/show the '
-         'results / save the results) with the argument "--out", "--eval"'
-         ', "--format-only", "--show" or "--show-dir"')
+    `Deformable DETR: Deformable Transformers for End-to-End Object Detection.
+    <https://arxiv.org/pdf/2010.04159.pdf>`_.
 
-    if args.eval and args.format_only:
-        raise ValueError('--eval and --format_only cannot be both specified')
+    Args:
+        embed_dims (int): The embedding dimension of Attention.
+            Default: 256.
+        num_heads (int): Parallel attention heads. Default: 64.
+        num_levels (int): The number of feature map used in
+            Attention. Default: 4.
+        num_points (int): The number of sampling points for
+            each query in each head. Default: 4.
+        im2col_step (int): The step used in image_to_column.
+            Default: 64.
+        dropout (float): A Dropout layer on `inp_identity`.
+            Default: 0.1.
+        batch_first (bool): Key, Query and Value are shape of
+            (batch, n, embed_dim)
+            or (n, batch, embed_dim). Default to False.
+        norm_cfg (dict): Config dict for normalization layer.
+            Default: None.
+        init_cfg (obj:`mmcv.ConfigDict`): The Config for initialization.
+            Default: None.
+    """
 
-    if args.out is not None and not args.out.endswith(('.pkl', '.pickle')):
-        raise ValueError('The output file must be a pkl file.')
+    def __init__(self,
+                 embed_dims=256,
+                 num_heads=8,
+                 num_levels=1,
+                 num_points=4,
+                 im2col_step=64,
+                 dropout=0.1,
+                 batch_first=True,
+                 norm_cfg=None,
+                 init_cfg=None):
+        super().__init__(init_cfg)
+        if embed_dims % num_heads != 0:
+            raise ValueError(f'embed_dims must be divisible by num_heads, '
+                             f'but got {embed_dims} and {num_heads}')
+        dim_per_head = embed_dims // num_heads
+        self.norm_cfg = norm_cfg
+        self.dropout = nn.Dropout(dropout)
+        self.batch_first = batch_first
+        self.fp16_enabled = False
 
-    print(args.config)
-    cfg = Config.fromfile(args.config)
-    if args.cfg_options is not None:
-        cfg.merge_from_dict(args.cfg_options)
-    # import modules from string list.
-    if cfg.get('custom_imports', None):
-        from mmcv.utils import import_modules_from_strings
-        import_modules_from_strings(**cfg['custom_imports'])
+        # you'd better set dim_per_head to a power of 2
+        # which is more efficient in the CUDA implementation
+        def _is_power_of_2(n):
+            if (not isinstance(n, int)) or (n < 0):
+                raise ValueError(
+                    'invalid input for _is_power_of_2: {} (type: {})'.format(
+                        n, type(n)))
+            return (n & (n - 1) == 0) and n != 0
 
-    # import modules from plguin/xx, registry will be updated
-    if hasattr(cfg, 'plugin'):
-        if cfg.plugin:
-            import importlib
-            if hasattr(cfg, 'plugin_dir'):
-                plugin_dir = cfg.plugin_dir
-                _module_dir = os.path.dirname(plugin_dir)
-                _module_dir = _module_dir.split('/')
-                _module_path = _module_dir[0]
+        if not _is_power_of_2(dim_per_head):
+            warnings.warn(
+                "You'd better set embed_dims in "
+                'MultiScaleDeformAttention to make '
+                'the dimension of each attention head a power of 2 '
+                'which is more efficient in our CUDA implementation.')
 
-                for m in _module_dir[1:]:
-                    _module_path = _module_path + '.' + m
-                logging.info(_module_path)
-                plg_lib = importlib.import_module(_module_path)
-            else:
-                # import dir is the dirpath for the config file
-                _module_dir = os.path.dirname(args.config)
-                _module_dir = _module_dir.split('/')
-                _module_path = _module_dir[0]
-                for m in _module_dir[1:]:
-                    _module_path = _module_path + '.' + m
-                logging.info(_module_path)
-                plg_lib = importlib.import_module(_module_path)
+        self.im2col_step = im2col_step
+        self.embed_dims = embed_dims
+        self.num_levels = num_levels
+        self.num_heads = num_heads
+        self.num_points = num_points
+        self.sampling_offsets = nn.Linear(
+            embed_dims, num_heads * num_levels * num_points * 2)
+        self.attention_weights = nn.Linear(embed_dims,
+                                           num_heads * num_levels * num_points)
+        self.value_proj = nn.Linear(embed_dims, embed_dims)
+        self.output_proj = nn.Linear(embed_dims, embed_dims)
+        self.init_weights()
 
-    # set cudnn_benchmark
-    if cfg.get('cudnn_benchmark', False):
-        torch.backends.cudnn.benchmark = True
+    def init_weights(self):
+        """Default initialization for Parameters of Module."""
+        constant_init(self.sampling_offsets, 0.)
+        thetas = torch.arange(
+            self.num_heads,
+            dtype=torch.float32) * (2.0 * math.pi / self.num_heads)
+        grid_init = torch.stack([thetas.cos(), thetas.sin()], -1)
+        grid_init = (grid_init /
+                     grid_init.abs().max(-1, keepdim=True)[0]).view(
+            self.num_heads, 1, 1,
+            2).repeat(1, self.num_levels, self.num_points, 1)
+        for i in range(self.num_points):
+            grid_init[:, :, i, :] *= i + 1
 
-    cfg.model.pretrained = None
-    # in case the test dataset is concatenated
-    samples_per_gpu = 2
-    if isinstance(cfg.data.test, dict):
-        cfg.data.test.test_mode = True
-        samples_per_gpu = cfg.data.test.pop('samples_per_gpu', 1)
-        if samples_per_gpu > 1:
-            # Replace 'ImageToTensor' to 'DefaultFormatBundle'
-            cfg.data.test.pipeline = replace_ImageToTensor(
-                cfg.data.test.pipeline)
-    elif isinstance(cfg.data.test, list):
-        for ds_cfg in cfg.data.test:
-            ds_cfg.test_mode = True
-        samples_per_gpu = max(
-            [ds_cfg.pop('samples_per_gpu', 1) for ds_cfg in cfg.data.test])
-        if samples_per_gpu > 1:
-            for ds_cfg in cfg.data.test:
-                ds_cfg.pipeline = replace_ImageToTensor(ds_cfg.pipeline)
+        self.sampling_offsets.bias.data = grid_init.view(-1)
+        constant_init(self.attention_weights, val=0., bias=0.)
+        xavier_init(self.value_proj, distribution='uniform', bias=0.)
+        xavier_init(self.output_proj, distribution='uniform', bias=0.)
+        self._is_init = True
 
-    # init distributed env first, since logger depends on the dist info.
-    if args.launcher == 'none':
-        distributed = False
-    else:
-        distributed = True
-        init_dist(args.launcher, **cfg.dist_params)
+    @deprecated_api_warning({'residual': 'identity'},
+                            cls_name='MultiScaleDeformableAttention')
+    def forward(self,
+                query,
+                key=None,
+                value=None,
+                identity=None,
+                query_pos=None,
+                key_padding_mask=None,
+                reference_points=None,
+                spatial_shapes=None,
+                level_start_index=None,
+                **kwargs):
+        """Forward Function of MultiScaleDeformAttention.
 
-    # set random seeds
-    if args.seed is not None:
-        set_random_seed(args.seed, deterministic=args.deterministic)
+        Args:
+            query (Tensor): Query of Transformer with shape
+                (num_query, bs, embed_dims).
+            key (Tensor): The key tensor with shape
+                `(num_key, bs, embed_dims)`.
+            value (Tensor): The value tensor with shape
+                `(num_key, bs, embed_dims)`.
+            identity (Tensor): The tensor used for addition, with the
+                same shape as `query`. Default None. If None,
+                `query` will be used.
+            query_pos (Tensor): The positional encoding for `query`.
+                Default: None.
+            key_pos (Tensor): The positional encoding for `key`. Default
+                None.
+            reference_points (Tensor):  The normalized reference
+                points with shape (bs, num_query, num_levels, 2),
+                all elements is range in [0, 1], top-left (0,0),
+                bottom-right (1, 1), including padding area.
+                or (N, Length_{query}, num_levels, 4), add
+                additional two dimensions is (w, h) to
+                form reference boxes.
+            key_padding_mask (Tensor): ByteTensor for `query`, with
+                shape [bs, num_key].
+            spatial_shapes (Tensor): Spatial shape of features in
+                different levels. With shape (num_levels, 2),
+                last dimension represents (h, w).
+            level_start_index (Tensor): The start index of each level.
+                A tensor has shape ``(num_levels, )`` and can be represented
+                as [0, h_0*w_0, h_0*w_0+h_1*w_1, ...].
 
-    # build the dataloader
-    dataset = build_dataset(cfg.data.test)
-    data_loader = build_dataloader(
-        dataset,
-        samples_per_gpu=samples_per_gpu,
-        workers_per_gpu=cfg.data.workers_per_gpu,
-        dist=distributed,
-        shuffle=False,
-        nonshuffler_sampler=cfg.data.nonshuffler_sampler,
-    )
+        Returns:
+             Tensor: forwarded results with shape [num_query, bs, embed_dims].
+        """
 
-    # build the model and load checkpoint
-    cfg.model.train_cfg = None
-    model = build_model(cfg.model, test_cfg=cfg.get('test_cfg'))
-    fp16_cfg = cfg.get('fp16', None)
-    if fp16_cfg is not None:
-        wrap_fp16_model(model)
-    checkpoint = load_checkpoint(model, args.checkpoint, map_location='cpu')
-    if args.fuse_conv_bn:
-        model = fuse_conv_bn(model)
-    # old versions did not save class info in checkpoints, this walkaround is
-    # for backward compatibility
-    if 'CLASSES' in checkpoint.get('meta', {}):
-        model.CLASSES = checkpoint['meta']['CLASSES']
-    else:
-        model.CLASSES = dataset.CLASSES
-    # palette for visualization in segmentation tasks
-    if 'PALETTE' in checkpoint.get('meta', {}):
-        model.PALETTE = checkpoint['meta']['PALETTE']
-    elif hasattr(dataset, 'PALETTE'):
-        # segmentation dataset has `PALETTE` attribute
-        model.PALETTE = dataset.PALETTE
+        if value is None:
+            value = query
 
- 
-    if args.result_file == None: 
-        if not distributed:
-            assert False
-            # model = MMDataParallel(model, device_ids=[0])
-            # outputs = single_gpu_test(model, data_loader, args.show, args.show_dir)
+        if identity is None:
+            identity = query
+        if query_pos is not None:
+            query = query + query_pos
+        if not self.batch_first:
+            # change to (bs, num_query ,embed_dims)
+            query = query.permute(1, 0, 2)
+            value = value.permute(1, 0, 2)
+
+        bs, num_query, _ = query.shape
+        bs, num_value, _ = value.shape
+        assert (spatial_shapes[:, 0] * spatial_shapes[:, 1]).sum() == num_value
+
+        value = self.value_proj(value)
+        if key_padding_mask is not None:
+            value = value.masked_fill(key_padding_mask[..., None], 0.0)
+        value = value.view(bs, num_value, self.num_heads, -1)
+
+        sampling_offsets = self.sampling_offsets(query).view(
+            bs, num_query, self.num_heads, self.num_levels, self.num_points, 2)
+        attention_weights = self.attention_weights(query).view(
+            bs, num_query, self.num_heads, self.num_levels * self.num_points)
+        attention_weights = attention_weights.softmax(-1)
+
+        attention_weights = attention_weights.view(bs, num_query,
+                                                   self.num_heads,
+                                                   self.num_levels,
+                                                   self.num_points)
+        if reference_points.shape[-1] == 2:
+            offset_normalizer = torch.stack(
+                [spatial_shapes[..., 1], spatial_shapes[..., 0]], -1)
+            sampling_locations = reference_points[:, :, None, :, None, :] \
+                + sampling_offsets \
+                / offset_normalizer[None, None, None, :, None, :]
+        elif reference_points.shape[-1] == 4:
+            sampling_locations = reference_points[:, :, None, :, None, :2] \
+                + sampling_offsets / self.num_points \
+                * reference_points[:, :, None, :, None, 2:] \
+                * 0.5
         else:
-            model = MMDistributedDataParallel(
-                model.cuda(),
-                device_ids=[torch.cuda.current_device()],
-                broadcast_buffers=False)
-            outputs = custom_multi_gpu_test(model, data_loader, args.tmpdir,
-                                        args.gpu_collect)
-   
-    rank, _ = get_dist_info()
-    if rank == 0:
-        if args.result_file != None:
-            outputs = mmcv.load(args.out)
-        elif args.out:
-            logging.info(f'\nwriting results to {args.out}')
-            #assert False
-            mmcv.dump(outputs, args.out)
-            #outputs = mmcv.load(args.out)
-        kwargs = {} if args.eval_options is None else args.eval_options
-        kwargs['jsonfile_prefix'] = osp.join('test', args.config.split(
-            '/')[-1].split('.')[-2], time.ctime().replace(' ', '_').replace(':', '_'))
-        if args.format_only:
-            print('formating results......')
-            dataset.format_results(outputs, **kwargs)
+            raise ValueError(
+                f'Last dim of reference_points must be'
+                f' 2 or 4, but get {reference_points.shape[-1]} instead.')
+        if torch.cuda.is_available() and value.is_cuda:
 
-        if args.eval:
-            eval_kwargs = cfg.get('evaluation', {}).copy()
-            # hard-code way to remove EvalHook args
-            for key in [
-                    'interval', 'tmpdir', 'start', 'gpu_collect', 'save_best',
-                    'rule'
-            ]:
-                eval_kwargs.pop(key, None)
-            eval_kwargs.update(dict(metric=args.eval, **kwargs))
-            print('evaluating results......')
-            logging.info(dataset.evaluate(outputs, **eval_kwargs))
+            # using fp16 deformable attention is unstable because it performs many sum operations
+            if value.dtype == torch.float16:
+                MultiScaleDeformableAttnFunction = MultiScaleDeformableAttnFunction_fp32
+            else:
+                MultiScaleDeformableAttnFunction = MultiScaleDeformableAttnFunction_fp32
+            output = MultiScaleDeformableAttnFunction.apply(
+                value, spatial_shapes, level_start_index, sampling_locations,
+                attention_weights, self.im2col_step)
+        else:
+            output = multi_scale_deformable_attn_pytorch(
+                value, spatial_shapes, sampling_locations, attention_weights)
 
+        output = self.output_proj(output)
 
-if __name__ == '__main__':
-    main()
+        if not self.batch_first:
+            # (num_query, bs ,embed_dims)
+            output = output.permute(1, 0, 2)
+
+        return self.dropout(output) + identity
