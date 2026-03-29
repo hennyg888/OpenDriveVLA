@@ -196,7 +196,7 @@ class Track_Map_Former(UniADTrack):
         
         active_index = (track_instances.obj_idxes>=0) & (track_instances.iou >= self.gt_iou_threshold) & (track_instances.matched_gt_idxes >=0)
         out.update(self.select_active_track_query(track_instances, active_index, img_metas))
-        out.update(self.select_sdc_track_query(track_instances[1800], img_metas))
+        out.update(self.select_sdc_track_query(track_instances[900], img_metas))
         
         # memory bank 
         if self.memory_bank is not None:
@@ -440,8 +440,8 @@ class Track_Map_Former(UniADTrack):
         track_instances.pred_boxes = output_coords[-1, 0]  # [300, box_dim]
         track_instances.output_embedding = query_feats[-1][0]  # [300, feat_dim]
         track_instances.ref_pts = last_ref_pts[0]
-        # hard_code: assume the 1801 query is sdc query 
-        track_instances.obj_idxes[1800] = -2
+        # hard_code: assume the 901 query is sdc query 
+        track_instances.obj_idxes[900] = -2
         """ update track base """
         self.track_base.update(track_instances, None)
        

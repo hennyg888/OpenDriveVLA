@@ -22,7 +22,7 @@ def _add_repo_to_syspath():
 _add_repo_to_syspath()
 
 # Configuration
-UNIAD_BEVFUSION_CONFIG = "/home/hhguo/OpenDriveVLA/projects/configs/uniad_bevfusion/pretrain_double_queries.py"
+UNIAD_BEVFUSION_CONFIG = "/home/hhguo/OpenDriveVLA/projects/configs/uniad_bevfusion/pretrain_decoder_temporal.py"
 UNIAD_BEVFUSION_CKPT = ""#"/home/s56cai/OpenDriveVLA/projects/work_dirs/uniad_bevfusion/pretrain_decoder/epoch_3.pth"
 
 
