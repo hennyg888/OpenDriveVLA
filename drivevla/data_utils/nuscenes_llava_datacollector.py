@@ -95,44 +95,23 @@ class DataCollatorForLLaVANuScenesDataset(object):
 
         return batch
     
-    def _test_call(self, instances):
-        assert len(instances) == 1, "Currently only one instance (batch_size=1) is supported"
+    def _test_call(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
+        assert len(instances) == 1, "Currently only one instance (batch_size=1) is supported for UniADTrackMapVisionTower inference"
 
         instance = instances[0]
 
         if "uniad_data" in instance:
-            uniad_data = collate([instance["uniad_data"]])
+            uniad_data = [instance["uniad_data"]]
+            uniad_data = collate(uniad_data)
+
+            # remove DataContainer to avoid GPU memory leak
             uniad_data = remove_datacontainer(uniad_data)
-
-            flatten_keys = [
-                "img",
-                "points",
-                "timestamp",
-                "l2g_r_mat",
-                "l2g_t",
-                "gt_lane_labels",
-                "gt_lane_bboxes",
-                "gt_lane_masks",
-                "gt_segmentation",
-            ]
-
-            for k in flatten_keys:
-                if k not in uniad_data:
-                    continue
-
-                v = uniad_data[k]
-
-                if k in ["img", "points"]:
-                    if torch.is_tensor(v):
-                        uniad_data[k] = v[0]
-                    else:
-                        uniad_data[k] = v
-                else:
-                    uniad_data[k] = v[0]
-
-            if "img_metas" in uniad_data:
-                uniad_data["img_metas"] = uniad_data["img_metas"][0]
-
+            uniad_data['img_metas'] = uniad_data['img_metas'][0]
+            uniad_data['img'] = uniad_data['img'][0]
+            
             instance["uniad_data"] = uniad_data
+
+        if "qa_instance_ind" in instance:
+            instance["qa_instance_ind"] = instance["qa_instance_ind"]
 
         return instance

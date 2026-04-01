@@ -327,8 +327,6 @@ class LlavaMetaForCausalLM(ABC):
 
         # use the image feature to encode scene
         img_feat_2D = result_track["img_feat_2D"]  # [1, 6, 256, 15, 25]
-        proj = self.get_model().mm_projector_scene
-        img_feat_2D = img_feat_2D.to(dtype=proj[0].weight.dtype) 
         img_feat_2D = img_feat_2D.squeeze(0)  # [6, 256, 15, 25]
         img_feat_2D = F.adaptive_max_pool2d(img_feat_2D, (3, 5))  # [6, 256, 3, 5]
         img_feat_2D = img_feat_2D.flatten(2) # [6, 256, 15]

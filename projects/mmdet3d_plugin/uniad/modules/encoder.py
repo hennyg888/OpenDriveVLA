@@ -11,11 +11,8 @@ import warnings
 from mmcv.cnn.bricks.registry import (ATTENTION,
                                       TRANSFORMER_LAYER,
                                       TRANSFORMER_LAYER_SEQUENCE)
-from mmcv.cnn.bricks.transformer import TransformerLayerSequence, build_feedforward_network, build_attention
+from mmcv.cnn.bricks.transformer import TransformerLayerSequence
 from mmcv.runner import force_fp32, auto_fp16
-from mmcv import ConfigDict
-from mmcv.cnn import build_norm_layer
-from mmcv.runner.base_module import BaseModule, ModuleList
 import numpy as np
 import torch
 import cv2 as cv
@@ -128,20 +125,8 @@ class BEVFormerEncoder(TransformerLayerSequence):
         reference_points_cam = reference_points_cam[..., 0:2] / torch.maximum(
             reference_points_cam[..., 2:3], torch.ones_like(reference_points_cam[..., 2:3]) * eps)
 
-        # reference_points_cam[..., 0] /= img_metas[0]['img_shape'][0][1]
-        # reference_points_cam[..., 1] /= img_metas[0]['img_shape'][0][0]
-
-        # Handle img_shape format differences between training and testing
-        img_shape = img_metas[0]['img_shape']
-        if isinstance(img_shape[0], (list, tuple)):
-            # Training format: [(H,W), (H,W), ...] for multiple cameras
-            img_h, img_w = img_shape[0][0], img_shape[0][1]
-        else:
-            # Test format: (H, W) single tuple
-            img_h, img_w = img_shape[0], img_shape[1]
-
-        reference_points_cam[..., 0] /= img_w
-        reference_points_cam[..., 1] /= img_h
+        reference_points_cam[..., 0] /= img_metas[0]['img_shape'][0][1]
+        reference_points_cam[..., 1] /= img_metas[0]['img_shape'][0][0]
 
         bev_mask = (bev_mask & (reference_points_cam[..., 1:2] > 0.0)
                     & (reference_points_cam[..., 1:2] < 1.0)
@@ -205,8 +190,7 @@ class BEVFormerEncoder(TransformerLayerSequence):
             ref_3d, self.pc_range, img_metas)
 
         # bug: this code should be 'shift_ref_2d = ref_2d.clone()', we keep this bug for reproducing our results in paper.
-        #fixed bug for bevfusionformer
-        shift_ref_2d = ref_2d.clone()
+        shift_ref_2d = ref_2d  # .clone()
         shift_ref_2d += shift[:, None, None, :]
 
         # (num_query, bs, embed_dims) -> (bs, num_query, embed_dims)
@@ -239,7 +223,6 @@ class BEVFormerEncoder(TransformerLayerSequence):
                 reference_points_cam=reference_points_cam,
                 bev_mask=bev_mask,
                 prev_bev=prev_bev,
-                pts_ref_2d=ref_2d,
                 **kwargs)
 
             bev_query = output
@@ -294,12 +277,8 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
             **kwargs)
         self.fp16_enabled = False
         assert len(operation_order) == 6
-        if 'temporal_cross_attn' in operation_order:
-            assert set(operation_order) == set(
-                ['self_attn', 'norm', 'temporal_cross_attn','ffn'])
-        else:
-            assert set(operation_order) == set(
-                ['self_attn', 'norm', 'cross_attn','ffn'])
+        assert set(operation_order) == set(
+            ['self_attn', 'norm', 'cross_attn', 'ffn'])
 
     def forward(self,
                 query,
@@ -395,251 +374,7 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
                 query = self.norms[norm_index](query)
                 norm_index += 1
 
-            #temporal cross attention
-            elif layer == 'temporal_cross_attn':
-                # TemporalCrossAttention expects batch_first format but value is in [num_query, bs, embed_dims]
-                # Need to convert value to batch_first before passing
-                if value is not None and value.dim() == 3 and value.shape[1] == 1:
-                    # value is [num_query, bs, embed_dims], convert to [bs, num_query, embed_dims]
-                    value_for_temporal = value.permute(1, 0, 2)
-                else:
-                    value_for_temporal = value
-                
-                query = self.attentions[attn_index](
-                    query,
-                    key,
-                    value_for_temporal,
-                    identity if self.pre_norm else None,
-                    query_pos=bev_pos,
-                    key_pos=bev_pos,
-                    attn_mask=attn_masks[attn_index],
-                    key_padding_mask=query_key_padding_mask,
-                    reference_points=ref_2d,
-                    spatial_shapes=torch.tensor(
-                        [[bev_h, bev_w]], device=query.device),
-                    level_start_index=torch.tensor([0], device=query.device),
-                    **kwargs)
-                attn_index += 1
-                identity = query
-
-            # spatial cross attention
-            elif layer == 'cross_attn':
-                query = self.attentions[attn_index](
-                    query,
-                    key,
-                    value,
-                    identity if self.pre_norm else None,
-                    query_pos=query_pos,
-                    key_pos=key_pos,
-                    reference_points=ref_3d,
-                    reference_points_cam=reference_points_cam,
-                    mask=mask,
-                    attn_mask=attn_masks[attn_index],
-                    key_padding_mask=key_padding_mask,
-                    spatial_shapes=spatial_shapes,
-                    level_start_index=level_start_index,
-                    **kwargs)
-                attn_index += 1
-                identity = query
-
-            elif layer == 'ffn':
-                query = self.ffns[ffn_index](
-                    query, identity if self.pre_norm else None)
-                ffn_index += 1
-
-        return query
-
-
-@TRANSFORMER_LAYER.register_module()
-class BEVFormerFusionLayer(BaseModule):
-    """BEV transformer layer with support for both camera and point cloud cross-attention.
-
-    Extends BEVFormerLayer by adding a `pts_cross_attn` operation for fusing
-    LiDAR point cloud features into the BEV representation.
-
-    Args:
-        attn_cfgs: Configs for attention modules (self_attn, cross_attn, pts_cross_attn).
-        ffn_cfgs: Config for FFN module.
-        operation_order (tuple[str]): Execution order, may include 'pts_cross_attn'.
-        norm_cfg (dict): Normalization layer config. Default: LN.
-        batch_first (bool): Whether batch is the first dimension. Default: True.
-    """
-
-    def __init__(self,
-                 attn_cfgs=None,
-                 ffn_cfgs=dict(
-                     type='FFN',
-                     embed_dims=256,
-                     feedforward_channels=1024,
-                     num_fcs=2,
-                     ffn_drop=0.,
-                     act_cfg=dict(type='ReLU', inplace=True),
-                 ),
-                 operation_order=None,
-                 norm_cfg=dict(type='LN'),
-                 init_cfg=None,
-                 batch_first=True,
-                 **kwargs):
-
-        deprecated_args = dict(
-            feedforward_channels='feedforward_channels',
-            ffn_dropout='ffn_drop',
-            ffn_num_fcs='num_fcs')
-        for ori_name, new_name in deprecated_args.items():
-            if ori_name in kwargs:
-                warnings.warn(
-                    f'The arguments `{ori_name}` in BaseTransformerLayer '
-                    f'has been deprecated, now you should set `{new_name}` '
-                    f'and other FFN related arguments '
-                    f'to a dict named `ffn_cfgs`. ')
-                ffn_cfgs[new_name] = kwargs[ori_name]
-
-        super(BEVFormerFusionLayer, self).__init__(init_cfg)
-
-        self.batch_first = batch_first
-
-        assert set(operation_order) & set(
-            ['self_attn', 'norm', 'ffn', 'cross_attn', 'pts_cross_attn']) == \
-            set(operation_order), f'The operation_order of' \
-            f' {self.__class__.__name__} should ' \
-            f'contains all four operation type ' \
-            f"{['self_attn', 'norm', 'ffn', 'cross_attn', 'pts_cross_attn']}"
-
-        num_attn = operation_order.count('self_attn') + operation_order.count(
-            'cross_attn') + operation_order.count('pts_cross_attn')
-        if isinstance(attn_cfgs, dict):
-            attn_cfgs = [copy.deepcopy(attn_cfgs) for _ in range(num_attn)]
-        else:
-            assert num_attn == len(attn_cfgs), f'The length ' \
-                f'of attn_cfg {num_attn} is ' \
-                f'not consistent with the number of attention' \
-                f'in operation_order {operation_order}.'
-
-        self.num_attn = num_attn
-        self.operation_order = operation_order
-        self.norm_cfg = norm_cfg
-        self.pre_norm = operation_order[0] == 'norm'
-        self.attentions = ModuleList()
-
-        index = 0
-        for operation_name in operation_order:
-            if operation_name in ['self_attn', 'cross_attn', 'pts_cross_attn']:
-                if 'batch_first' in attn_cfgs[index]:
-                    assert self.batch_first == attn_cfgs[index]['batch_first']
-                else:
-                    attn_cfgs[index]['batch_first'] = self.batch_first
-                attention = build_attention(attn_cfgs[index])
-                attention.operation_name = operation_name
-                self.attentions.append(attention)
-                index += 1
-
-        self.embed_dims = self.attentions[0].embed_dims
-
-        self.ffns = ModuleList()
-        num_ffns = operation_order.count('ffn')
-        if isinstance(ffn_cfgs, dict):
-            ffn_cfgs = ConfigDict(ffn_cfgs)
-        if isinstance(ffn_cfgs, dict):
-            ffn_cfgs = [copy.deepcopy(ffn_cfgs) for _ in range(num_ffns)]
-        assert len(ffn_cfgs) == num_ffns
-        for ffn_index in range(num_ffns):
-            if 'embed_dims' not in ffn_cfgs[ffn_index]:
-                ffn_cfgs['embed_dims'] = self.embed_dims
-            else:
-                assert ffn_cfgs[ffn_index]['embed_dims'] == self.embed_dims
-
-            self.ffns.append(
-                build_feedforward_network(ffn_cfgs[ffn_index]))
-
-        self.norms = ModuleList()
-        num_norms = operation_order.count('norm')
-        for _ in range(num_norms):
-            self.norms.append(build_norm_layer(norm_cfg, self.embed_dims)[1])
-
-    def forward(self,
-                query,
-                key=None,
-                value=None,
-                bev_pos=None,
-                query_pos=None,
-                key_pos=None,
-                attn_masks=None,
-                query_key_padding_mask=None,
-                key_padding_mask=None,
-                ref_2d=None,
-                ref_3d=None,
-                bev_h=None,
-                bev_w=None,
-                reference_points_cam=None,
-                mask=None,
-                spatial_shapes=None,
-                level_start_index=None,
-                prev_bev=None,
-                pts_ref_2d=None,
-                pts_feats=None,
-                pts_spatial_shapes=None,
-                pts_level_start_index=None,
-                **kwargs):
-        """Forward function supporting camera cross-attention and point cloud cross-attention."""
-
-        norm_index = 0
-        attn_index = 0
-        ffn_index = 0
-        identity = query
-        if attn_masks is None:
-            attn_masks = [None for _ in range(self.num_attn)]
-        elif isinstance(attn_masks, torch.Tensor):
-            attn_masks = [
-                copy.deepcopy(attn_masks) for _ in range(self.num_attn)
-            ]
-            warnings.warn(f'Use same attn_mask in all attentions in '
-                          f'{self.__class__.__name__} ')
-        else:
-            assert len(attn_masks) == self.num_attn, f'The length of ' \
-                                                     f'attn_masks {len(attn_masks)} must be equal ' \
-                                                     f'to the number of attention in ' \
-                f'operation_order {self.num_attn}'
-
-        for layer in self.operation_order:
-            if layer == 'self_attn':
-                query = self.attentions[attn_index](
-                    query,
-                    prev_bev,
-                    prev_bev,
-                    identity if self.pre_norm else None,
-                    query_pos=bev_pos,
-                    key_pos=bev_pos,
-                    attn_mask=attn_masks[attn_index],
-                    key_padding_mask=query_key_padding_mask,
-                    reference_points=ref_2d,
-                    spatial_shapes=torch.tensor(
-                        [[bev_h, bev_w]], device=query.device),
-                    level_start_index=torch.tensor([0], device=query.device),
-                    **kwargs)
-                attn_index += 1
-                identity = query
-
-            elif layer == 'pts_cross_attn':
-                query = self.attentions[attn_index](
-                    query,
-                    pts_feats,
-                    pts_feats,
-                    identity if self.pre_norm else None,
-                    query_pos=bev_pos,
-                    key_pos=bev_pos,
-                    attn_mask=attn_masks[attn_index],
-                    key_padding_mask=query_key_padding_mask,
-                    reference_points=pts_ref_2d,
-                    spatial_shapes=pts_spatial_shapes,
-                    level_start_index=pts_level_start_index,
-                    **kwargs)
-                attn_index += 1
-                identity = query
-
-            elif layer == 'norm':
-                query = self.norms[norm_index](query)
-                norm_index += 1
-
+            # spaital cross attention
             elif layer == 'cross_attn':
                 query = self.attentions[attn_index](
                     query,

@@ -142,9 +142,6 @@ class NuScenesE2EDataset(NuScenesDataset):
         self.occ_filter_invalid_sample = occ_filter_invalid_sample
         self.occ_filter_by_valid_flag = occ_filter_by_valid_flag
         self.occ_only_total_frames = 7  # NOTE: hardcode, not influenced by planning
-        # set group flag for the samplers
-        if not self.test_mode:
-            self._set_group_flag()
 
     def __len__(self):
         if not self.is_debug:
@@ -274,12 +271,7 @@ class NuScenesE2EDataset(NuScenesDataset):
         data_dict = {}
         for key, value in example.items():
             if 'l2g' in key:
-                v = value
-                if isinstance(v, (list, tuple)):
-                    v = v[0]
-                if isinstance(v, np.generic):
-                    v = v.item()
-                data_dict[key] = to_tensor(v)
+                data_dict[key] = to_tensor(value[0])
             else:
                 data_dict[key] = value
         return data_dict
@@ -289,25 +281,10 @@ class NuScenesE2EDataset(NuScenesDataset):
         convert sample dict into one single sample.
         """
         imgs_list = [each['img'].data for each in queue]
-        points_list = [each['points'].data for each in queue] if 'points' in queue[0] else None
         gt_labels_3d_list = [each['gt_labels_3d'].data for each in queue]
         gt_sdc_label_list = [each['gt_sdc_label'].data for each in queue]
         gt_inds_list = [to_tensor(each['gt_inds']) for each in queue]
         gt_bboxes_3d_list = [each['gt_bboxes_3d'].data for each in queue]
-        gt_lane_labels_list = [each['gt_lane_labels'].data for each in queue] if 'gt_lane_labels' in queue[0] else None
-        gt_lane_bboxes_list = [each['gt_lane_bboxes'].data for each in queue] if 'gt_lane_bboxes' in queue[0] else None
-        gt_lane_masks_list = [each['gt_lane_masks'].data for each in queue] if 'gt_lane_masks' in queue[0] else None
-        gt_segmentation_list = [each['gt_segmentation'].data for each in queue] if 'gt_segmentation' in queue[0] else None
-        gt_instance_list = [each['gt_instance'].data for each in queue] if 'gt_instance' in queue[0] else None
-        gt_centerness_list = [each['gt_centerness'].data for each in queue] if 'gt_centerness' in queue[0] else None
-        gt_offset_list = [each['gt_offset'].data for each in queue] if 'gt_offset' in queue[0] else None
-        gt_flow_list = [each['gt_flow'].data for each in queue] if 'gt_flow' in queue[0] else None
-        gt_backward_flow_list = [each['gt_backward_flow'].data for each in queue] if 'gt_backward_flow' in queue[0] else None
-        gt_occ_has_invalid_frame_list = [each['gt_occ_has_invalid_frame'] if not isinstance(each['gt_occ_has_invalid_frame'], DC) else each['gt_occ_has_invalid_frame'].data for each in queue] if 'gt_occ_has_invalid_frame' in queue[0] else None
-        gt_occ_img_is_valid_list = [each['gt_occ_img_is_valid'] if not isinstance(each['gt_occ_img_is_valid'], DC) else each['gt_occ_img_is_valid'].data for each in queue] if 'gt_occ_img_is_valid' in queue[0] else None
-        sdc_planning_list = [each['sdc_planning'] if not isinstance(each['sdc_planning'], DC) else each['sdc_planning'].data for each in queue] if 'sdc_planning' in queue[0] else None
-        sdc_planning_mask_list = [each['sdc_planning_mask'] if not isinstance(each['sdc_planning_mask'], DC) else each['sdc_planning_mask'].data for each in queue] if 'sdc_planning_mask' in queue[0] else None
-        command_list = [each['command'] if not isinstance(each['command'], DC) else each['command'].data for each in queue] if 'command' in queue[0] else None
         gt_past_traj_list = [to_tensor(each['gt_past_traj']) for each in queue]
         gt_past_traj_mask_list = [
             to_tensor(each['gt_past_traj_mask']) for each in queue]
@@ -324,13 +301,9 @@ class NuScenesE2EDataset(NuScenesDataset):
         gt_fut_traj_mask = to_tensor(queue[-1]['gt_fut_traj_mask'])
         gt_sdc_fut_traj = to_tensor(queue[-1]['gt_sdc_fut_traj'])
         gt_sdc_fut_traj_mask = to_tensor(queue[-1]['gt_sdc_fut_traj_mask'])
-        gt_future_boxes_list = [
-            each['gt_future_boxes'] for each in queue
-        ] if 'gt_future_boxes' in queue[-1] else None
-        gt_future_labels_list = [
-            [to_tensor(item) for item in each['gt_future_labels']]
-            for each in queue
-        ] if 'gt_future_labels' in queue[-1] else None
+        gt_future_boxes_list = queue[-1]['gt_future_boxes']
+        gt_future_labels_list = [to_tensor(each)
+                                 for each in queue[-1]['gt_future_labels']]
 
         metas_map = {}
         prev_pos = None
@@ -356,42 +329,12 @@ class NuScenesE2EDataset(NuScenesDataset):
                               cpu_only=False, stack=True)
         queue[-1]['img_metas'] = DC(metas_map, cpu_only=True)
         queue = queue[-1]
-        if points_list is not None:
-            queue['points'] = DC(points_list, cpu_only=False, stack=False)
 
         queue['gt_labels_3d'] = DC(gt_labels_3d_list)
         queue['gt_sdc_label'] = DC(gt_sdc_label_list)
         queue['gt_inds'] = DC(gt_inds_list)
         queue['gt_bboxes_3d'] = DC(gt_bboxes_3d_list, cpu_only=True)
         queue['gt_sdc_bbox'] = DC(gt_sdc_bbox_list, cpu_only=True)
-        if gt_lane_labels_list is not None:
-            queue['gt_lane_labels'] = DC(gt_lane_labels_list)
-        if gt_lane_bboxes_list is not None:
-            queue['gt_lane_bboxes'] = DC(gt_lane_bboxes_list)
-        if gt_lane_masks_list is not None:
-            queue['gt_lane_masks'] = DC(gt_lane_masks_list)
-        if gt_segmentation_list is not None:
-            queue['gt_segmentation'] = DC(gt_segmentation_list)
-        if gt_instance_list is not None:
-            queue['gt_instance'] = DC(gt_instance_list)
-        if gt_centerness_list is not None:
-            queue['gt_centerness'] = DC(gt_centerness_list)
-        if gt_offset_list is not None:
-            queue['gt_offset'] = DC(gt_offset_list)
-        if gt_flow_list is not None:
-            queue['gt_flow'] = DC(gt_flow_list)
-        if gt_backward_flow_list is not None:
-            queue['gt_backward_flow'] = DC(gt_backward_flow_list)
-        if gt_occ_has_invalid_frame_list is not None:
-            queue['gt_occ_has_invalid_frame'] = DC(gt_occ_has_invalid_frame_list, cpu_only=True)
-        if gt_occ_img_is_valid_list is not None:
-            queue['gt_occ_img_is_valid'] = DC(gt_occ_img_is_valid_list, cpu_only=True)
-        if sdc_planning_list is not None:
-            queue['sdc_planning'] = DC(sdc_planning_list, cpu_only=True)
-        if sdc_planning_mask_list is not None:
-            queue['sdc_planning_mask'] = DC(sdc_planning_mask_list, cpu_only=True)
-        if command_list is not None:
-            queue['command'] = DC(command_list, cpu_only=True)
         queue['l2g_r_mat'] = DC(l2g_r_mat_list)
         queue['l2g_t'] = DC(l2g_t_list)
         queue['timestamp'] = DC(timestamp_list)
@@ -399,10 +342,8 @@ class NuScenesE2EDataset(NuScenesDataset):
         queue['gt_fut_traj_mask'] = DC(gt_fut_traj_mask)
         queue['gt_past_traj'] = DC(gt_past_traj_list)
         queue['gt_past_traj_mask'] = DC(gt_past_traj_mask_list)
-        if gt_future_boxes_list is not None:
-            queue['gt_future_boxes'] = DC(gt_future_boxes_list, cpu_only=True)
-        if gt_future_labels_list is not None:
-            queue['gt_future_labels'] = DC(gt_future_labels_list)
+        queue['gt_future_boxes'] = DC(gt_future_boxes_list, cpu_only=True)
+        queue['gt_future_labels'] = DC(gt_future_labels_list)
         return queue
 
     def get_ann_info(self, index):
@@ -489,15 +430,6 @@ class NuScenesE2EDataset(NuScenesDataset):
         assert gt_past_traj.shape[0] == gt_labels_3d.shape[0]
         return anns_results
 
-    def _fix_nuscenes_path(self, path):
-        if path is None:
-            return None
-        if os.path.isabs(path):
-            if "nuscenes/" in path:
-                path = path.split("nuscenes/")[-1]
-            path = os.path.join(self.data_root, path)
-        return path
-    
     def get_data_info(self, index):
         """Get data info according to the given index.
 
@@ -566,23 +498,11 @@ class NuScenesE2EDataset(NuScenesDataset):
         gt_bboxes = torch.tensor(np.stack(gt_bboxes))
         gt_masks = torch.stack(gt_masks)
 
-        pts_filename = info['lidar_path']
-        if not os.path.exists(pts_filename):
-            rel_path = os.path.basename(os.path.dirname(pts_filename))
-            pts_filename = os.path.join(
-                self.data_root, "samples", "LIDAR_TOP", os.path.basename(pts_filename)
-            )
-        fixed_sweeps = []
-        for sweep in info.get('sweeps', []):
-            sweep = sweep.copy()
-            sweep['data_path'] = self._fix_nuscenes_path(sweep['data_path'])
-            fixed_sweeps.append(sweep)
-
         # standard protocal modified from SECOND.Pytorch
         input_dict = dict(
             sample_idx=info['token'],
-            pts_filename=pts_filename,
-            sweeps=fixed_sweeps,
+            pts_filename=info['lidar_path'],
+            sweeps=info['sweeps'],
             ego2global_translation=info['ego2global_translation'],
             ego2global_rotation=info['ego2global_rotation'],
             prev_idx=info['prev'],
@@ -618,10 +538,7 @@ class NuScenesE2EDataset(NuScenesDataset):
             lidar2cam_rts = []
             cam_intrinsics = []
             for cam_type, cam_info in info['cams'].items():
-                img_path = cam_info['data_path']
-                if not os.path.isabs(img_path):
-                    img_path = os.path.join(self.data_root, img_path)
-                image_paths.append(img_path)
+                image_paths.append(cam_info['data_path'])
                 # obtain lidar to image transformation matrix
                 lidar2cam_r = np.linalg.inv(cam_info['sensor2lidar_rotation'])
                 lidar2cam_t = cam_info[
@@ -691,42 +608,6 @@ class NuScenesE2EDataset(NuScenesDataset):
         # generate detection labels for current + future frames
         input_dict['occ_future_ann_infos'] = \
             self.get_future_detection_infos(future_frames)
-            
-        lidar2ego = np.eye(4, dtype=np.float32)
-        lidar2ego[:3, :3] = Quaternion(info['lidar2ego_rotation']).rotation_matrix
-        lidar2ego[:3, 3] = info['lidar2ego_translation']
-        camera2ego = []
-
-        for cam_type, cam_info in info['cams'].items():
-            c2e = np.eye(4, dtype=np.float32)
-            c2e[:3, :3] = Quaternion(cam_info['sensor2ego_rotation']).rotation_matrix
-            c2e[:3, 3] = cam_info['sensor2ego_translation']
-            camera2ego.append(c2e)
-        lidar2camera = []
-        camera2lidar = []
-
-        for cam_info in info['cams'].values():
-            # camera -> lidar
-            c2l = np.eye(4, dtype=np.float32)
-            c2l[:3, :3] = cam_info['sensor2lidar_rotation']
-            c2l[:3, 3] = cam_info['sensor2lidar_translation']
-            camera2lidar.append(c2l)
-
-            # lidar -> camera
-            l2c = np.linalg.inv(c2l)
-            lidar2camera.append(l2c)
-            
-        input_dict.update(
-            dict(
-                lidar2ego=lidar2ego,
-                camera2ego=camera2ego,
-                lidar2camera=lidar2camera,
-                camera2lidar=camera2lidar,
-                camera_intrinsics=cam_intrinsics,
-                lidar2image=lidar2img_rts,
-            )
-        )
-
         return input_dict
 
     def get_future_detection_infos(self, future_frames):
@@ -1272,7 +1153,6 @@ class NuScenesE2EDataset(NuScenesDataset):
             'v1.0-trainval': 'val',
         }
         detail = dict()
-        metric_prefix = f'{result_name}_NuScenes'
 
         if 'det' in self.eval_mod:
             self.nusc_eval = NuScenesEval_custom(

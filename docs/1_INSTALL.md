@@ -7,7 +7,7 @@ conda create -n drivevla python=3.10 -y
 conda activate drivevla
 pip install --upgrade pip  # Enable PEP 660 support.
 pip install torch==2.1.2
-# pip install -e ".[train]"
+pip install -e ".[train]"
 ```
 
 ## 2. Install mmcv-full from source code

@@ -65,6 +65,8 @@ def load_model_with_deepspeed(args, device):
 
     # DeepSpeed inference configuration
     ds_config = {
+        "fp16": {"enabled": args.fp16},
+        "bf16": {"enabled": args.bf16},
         "zero_optimization": {
             "stage": 0
         },
@@ -94,8 +96,8 @@ def inference_data(data, model_engine, tokenizer, args):
     qa_instance_ind = data.get("qa_instance_ind", None)
     
     with torch.inference_mode():
-        # with torch.cuda.amp.autocast(dtype=torch.bfloat16 if args.bf16 else torch.float16):
-        cont = model_engine.generate(
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16 if args.bf16 else torch.float16):
+            cont = model_engine.generate(
                 input_ids,
                 uniad_data=uniad_data,
                 uniad_pth=uniad_pth,
@@ -169,7 +171,7 @@ def inference_planning_oriented_vlm(args):
     tokenizer, model_engine, image_processor, context_len = load_model_with_deepspeed(args, device)
     model_engine.eval()
 
-    uniad_cfg: Config = Config.fromfile("/home/s56cai/OpenDriveVLA/projects/configs/bevfusion_track_map/bevfusion.py")
+    uniad_cfg: Config = Config.fromfile("projects/configs/stage1_track_map/base_track_map.py")
     data_args = DataArguments(
         data_path=args.data,
         lazy_preprocess=True,

@@ -33,7 +33,7 @@ cd DriveVLA/data/nuscenes
 gdown 16X0_-v-iXP9hVLNaDMmIiGhZKj24YOnb
 ```
 
-### The Overall Structure
+## The Overall Structure
 
 ```shell
 DriveVLA
@@ -49,22 +49,4 @@ DriveVLA
 │   │   ├── v1.0-test/
 │   │   ├── v1.0-trainval/
 │   │   ├── cached_nuscenes_info.pkl
-```
-
-## Evaluation Dataset
-
-We adopt the GT cache from [GPT-Driver](https://github.com/PointsCoder/GPT-Driver). Download gt for evaluation at [Google Drive](https://drive.google.com/drive/folders/1NCqPtdK8agPi1q3sr9-8-vPdYj08OCAE).
-
-The structure is as follows:
-
-```shell
-eval_share
-├── gt
-│   ├── gt_traj_mask.pkl
-│   ├── gt_traj.pkl
-│   ├── planing_gt_segmentation_val
-│   └── vad_gt_seg.pkl
-├── __init__.py
-├── metric.py
-└── README.md
 ```

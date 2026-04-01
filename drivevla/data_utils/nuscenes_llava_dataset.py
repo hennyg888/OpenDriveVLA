@@ -13,7 +13,7 @@ import pickle
 from llava.train.train import preprocess
 from llava.conversation import conv_templates
 from llava.mm_utils import tokenizer_uniad_token
-from mmcv.parallel import DataContainer as DC
+
 import transformers
 
 from mmdet.datasets.pipelines import to_tensor
@@ -245,13 +245,7 @@ class LLaVANuScenesDataset(NuScenesE2EDataset):
             else:
                 uniad_data[key] = value
         uniad_data_dict = {"uniad_data": uniad_data}
-        img_metas = uniad_data_dict['uniad_data']['img_metas']
-        if isinstance(img_metas, DC):
-            data = img_metas.data
-            if isinstance(data, list):
-                data[0].pop('box_type_3d', None)
-            elif isinstance(data, dict):
-                data.pop('box_type_3d', None)
+        uniad_data_dict['uniad_data']['img_metas'][0]._data.pop('box_type_3d')
         return uniad_data_dict
 
     def _get_llava_train_data(self, idx):
@@ -317,23 +311,7 @@ class LLaVANuScenesDataset(NuScenesE2EDataset):
         if os.path.exists(data['uniad_pth']):
             uniad_pth = torch.load(data['uniad_pth'], map_location=self.device)
         else:
-            if self.llava_train_mode:
-                os.makedirs('data/uniad_results_for_vlm/train/', exist_ok=True)
-                
-                print(f"\nFetching {data['sample_id']}.pth from remote server...")
-
-                os.system(f"rsync -a --partial --append-verify --info=progress2 --human-readable ge86wob2@login.ai.lrz.de:/dss/dssfs04/lwp-dss-0002/pn39vu/pn39vu-dss-0001/xuyuan/workspace/repos/drivevlms.worktrees/planning-oriented/llava-next/uniad/data/uniad_results_for_vlm/train/{data['sample_id']}.pth data/uniad_results_for_vlm/train/")
-                
-                uniad_pth = torch.load(data['uniad_pth'], map_location=self.device)
-                
-            elif self.llava_test_mode:
-                os.makedirs('data/uniad_results_for_vlm/val/', exist_ok=True)
-                
-                print(f"\nFetching {data['sample_id']}.pth from remote server...")
-
-                os.system(f"rsync -a --partial --append-verify --info=progress2 --human-readable ge86wob2@login.ai.lrz.de:/dss/dssfs04/lwp-dss-0002/pn39vu/pn39vu-dss-0001/xuyuan/workspace/repos/drivevlms.worktrees/planning-oriented/llava-next/uniad/data/uniad_results_for_vlm/val/{data['sample_id']}.pth data/uniad_results_for_vlm/val/")
-
-                uniad_pth = torch.load(data['uniad_pth'], map_location=self.device)
+            raise FileNotFoundError(f"uniad_pth file not found: {data['uniad_pth']}")
 
         uniad_pth_dict = {"uniad_pth": uniad_pth}
         return uniad_pth_dict
