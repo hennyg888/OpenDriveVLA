@@ -39,9 +39,11 @@ class LLaVANuScenesDataset(NuScenesE2EDataset):
                  llava_test_mode: bool = False,
                  use_uniad_pth: bool = False,
                  in_nuscenes_order: bool = True,
-                 *args, 
+                 skip_build_conversation: bool = False,
+                 *args,
                  **kwargs):
         NuScenesE2EDataset_config.pop('type')
+        self.list_data_dict = []  # must exist before super().__init__ calls _set_group_flag -> __len__
         super().__init__(*args, **NuScenesE2EDataset_config, **kwargs)
         
         self.tokenizer = tokenizer
@@ -51,6 +53,7 @@ class LLaVANuScenesDataset(NuScenesE2EDataset):
         self.llava_test_mode = llava_test_mode
         self.use_uniad_pth = use_uniad_pth
         self.in_nuscenes_order = in_nuscenes_order
+        self.skip_build_conversation = skip_build_conversation
         self.cached_nuscenes_data = pickle.load(open('data/nuscenes/cached_nuscenes_info.pkl', 'rb'))
         if self.use_uniad_pth:
             self.in_nuscenes_order = False
@@ -78,6 +81,7 @@ class LLaVANuScenesDataset(NuScenesE2EDataset):
         print(f"llava_test_mode: {self.llava_test_mode}")
         print(f"in_nuscenes_order: {self.in_nuscenes_order}")
         print(f"use_uniad_pth: {self.use_uniad_pth}")
+        print(f"skip_build_conversation: {self.skip_build_conversation}")
 
     def _load_conversation_data(self):
         data_path = self.data_args.data_path
@@ -199,6 +203,18 @@ class LLaVANuScenesDataset(NuScenesE2EDataset):
         if self.use_uniad_pth:
             uniad_pth_dict = self._get_uniad_pth_data(idx)
 
+            # If this sample needs a specific object embedding (<OBJECT> token) but
+            # the tracker did not detect that object, skip to a random other sample
+            # rather than training with the token silently dropped.
+            if 'qa_instance_ind' in llava_data_dict:
+                track_gt_inds = (
+                    uniad_pth_dict.get('uniad_pth', {})
+                    .get('result_track', {})
+                    .get('track_gt_inds_to_embed_idx', {})
+                )
+                if llava_data_dict['qa_instance_ind'] not in track_gt_inds:
+                    return self.__getitem__(self._rand_another(idx))
+
         if self.in_nuscenes_order:
             return uniad_data_dict | llava_data_dict | uniad_pth_dict
         else:
@@ -250,7 +266,8 @@ class LLaVANuScenesDataset(NuScenesE2EDataset):
 
     def _get_llava_train_data(self, idx):
         source = self.list_data_dict[idx]
-        source = build_llava_conversation(source, self.cached_nuscenes_data)
+        if not self.skip_build_conversation:
+            source = build_llava_conversation(source, self.cached_nuscenes_data)
         sources = [source]
         assert len(sources) == 1
 

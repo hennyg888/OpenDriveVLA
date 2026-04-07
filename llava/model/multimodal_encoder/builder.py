@@ -6,6 +6,7 @@ from .hf_vision import HFVisionTower
 from .siglip_encoder import SigLipVisionTower
 from .clip_encoder import CLIPVisionTower, CLIPVisionTowerS2
 from .uniad_track_map import UniadTrackMapVisionTower
+from .fusionad_track_map import FusionADVisionTower
 
 # from .eva_clip.eva_clip_encoder import EvaClipVisionTower
 # from .dev_eva_clip.eva_vit import EvaViTWrapper
@@ -17,6 +18,8 @@ def build_vision_tower(vision_tower_cfg, **kwargs):
     use_s2 = getattr(vision_tower_cfg, "s2", False)
     if "uniad_track_map" in vision_tower:
         return UniadTrackMapVisionTower(vision_tower, vision_tower_cfg=vision_tower_cfg, **kwargs)
+    elif "fusionad_track_map" in vision_tower:
+        return FusionADVisionTower(vision_tower, vision_tower_cfg=vision_tower_cfg, **kwargs)
     elif is_absolute_path_exists or vision_tower.startswith("openai") or vision_tower.startswith("laion") or "ShareGPT4V" in vision_tower:
         if use_s2:
             return CLIPVisionTowerS2(vision_tower, args=vision_tower_cfg, **kwargs)

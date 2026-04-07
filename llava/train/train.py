@@ -132,6 +132,7 @@ class DataArguments:
 
     in_nuscenes_order: bool = field(default=True)
     use_uniad_pth: bool = field(default=True)
+    skip_build_conversation: bool = field(default=False)
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
