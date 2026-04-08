@@ -139,6 +139,7 @@ class PerceptionTransformer(BaseModule):
             if prev_bev.shape[1] == bev_h * bev_w:
                 prev_bev = prev_bev.permute(1, 0, 2)
             if self.rotate_prev_bev:
+                prev_bev = prev_bev.clone()
                 for i in range(bs):
                     rotation_angle = img_metas[i]['can_bus'][-1]
                     tmp_prev_bev = prev_bev[:, i].reshape(
@@ -243,6 +244,7 @@ class PerceptionTransformer(BaseModule):
             if prev_bev.shape[1] == bev_h * bev_w:
                 prev_bev = prev_bev.permute(1, 0, 2)
             if self.rotate_prev_bev:
+                prev_bev = prev_bev.clone()
                 for i in range(bs):
                     rotation_angle = img_metas[i]['can_bus'][-1]
                     tmp_prev_bev = prev_bev[:, i].reshape(

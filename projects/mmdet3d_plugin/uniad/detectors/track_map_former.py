@@ -1,5 +1,6 @@
 import copy
 import torch
+import torch.utils.checkpoint
 from mmdet.models import DETECTORS, build_head
 from .uniad_track import UniADTrack
 from typing import Dict
@@ -29,14 +30,15 @@ class Track_Map_Former(UniADTrack):
             occ=1.0,
             planning=1.0
         ),
+        use_checkpoint=False,
         *args,
         **kwargs
     ):
         super().__init__(*args, **kwargs)
 
         self.seg_head = build_head(seg_head) if seg_head is not None else None
-
         self.task_loss_weight = task_loss_weight
+        self.use_checkpoint = use_checkpoint
 
     @property
     def with_motion_head(self):
@@ -73,6 +75,25 @@ class Track_Map_Former(UniADTrack):
             with torch.no_grad():
                 bev_embed, bev_pos = self.pts_bbox_head.get_bev_embed_with_history(
                     current_bev_embed=bev_embed, img_metas=img_metas, prev_bev=prev_bev)
+        elif self.use_checkpoint:
+            # Gradient checkpointing: recompute encoder activations during backward instead of
+            # storing all 6 layers × 5 frames simultaneously (~15GB → ~200MB for encoder).
+            # use_reentrant=False: supports non-tensor closure captures (img_metas is a dict).
+            # img_metas and _has_prev are captured from the enclosing scope per-frame call,
+            # so recomputation always uses the correct frame-specific metadata.
+            _prev_bev = prev_bev if prev_bev is not None else bev_embed.new_zeros(1)
+            _has_prev = prev_bev is not None
+
+            def _ckpt_fn(_bev, _pb):
+                return self.pts_bbox_head.get_bev_embed_with_history(
+                    current_bev_embed=_bev,
+                    img_metas=img_metas,
+                    prev_bev=_pb if _has_prev else None,
+                )
+
+            bev_embed, bev_pos = torch.utils.checkpoint.checkpoint(
+                _ckpt_fn, bev_embed, _prev_bev, use_reentrant=False,
+            )
         else:
             bev_embed, bev_pos = self.pts_bbox_head.get_bev_embed_with_history(
                     current_bev_embed=bev_embed, img_metas=img_metas, prev_bev=prev_bev)

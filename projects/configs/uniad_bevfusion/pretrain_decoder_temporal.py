@@ -214,6 +214,7 @@ model = dict(
         queue_length=queue_length,
         use_grid_mask=True,
         video_test_mode=True,
+        use_checkpoint=True,
         num_query=900,
         num_classes=10,
         pc_range=point_cloud_range,
