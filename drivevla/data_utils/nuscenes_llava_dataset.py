@@ -203,18 +203,6 @@ class LLaVANuScenesDataset(NuScenesE2EDataset):
         if self.use_uniad_pth:
             uniad_pth_dict = self._get_uniad_pth_data(idx)
 
-            # If this sample needs a specific object embedding (<OBJECT> token) but
-            # the tracker did not detect that object, skip to a random other sample
-            # rather than training with the token silently dropped.
-            if 'qa_instance_ind' in llava_data_dict:
-                track_gt_inds = (
-                    uniad_pth_dict.get('uniad_pth', {})
-                    .get('result_track', {})
-                    .get('track_gt_inds_to_embed_idx', {})
-                )
-                if llava_data_dict['qa_instance_ind'] not in track_gt_inds:
-                    return self.__getitem__(self._rand_another(idx))
-
         if self.in_nuscenes_order:
             return uniad_data_dict | llava_data_dict | uniad_pth_dict
         else:
