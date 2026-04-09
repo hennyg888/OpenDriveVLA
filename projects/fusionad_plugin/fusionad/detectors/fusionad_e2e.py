@@ -479,21 +479,26 @@ class FusionAD(FusionADTrack):
 
         if gt_bboxes_3d is not None and gt_inds is not None:
             try:
-                detected_boxes3d = result_track['track_bbox_results'][0][0].tensor  # [N+1, 9]
+                # track_bbox_results contains only non-SDC tracked objects (SDC is in sdc_track_bbox_results)
+                detected_boxes3d = result_track['track_bbox_results'][0][0].tensor  # [N, 9]
                 if detected_boxes3d.shape[0] > 0:
-                    gt_boxes_obj  = gt_bboxes_3d[0][0]   # LiDARInstance3DBoxes
-                    gt_inds_frame = gt_inds[0][0]         # Tensor [M]
-                    detected_bboxes = detected_boxes3d[:-1, :7].to(gt_boxes_obj.tensor)  # drop sdc
+                    # gt_bboxes_3d structure: [batch][aug][queue_frame] → need [-1] for current frame
+                    # Unwrap until we reach a LiDARInstance3DBoxes
+                    gt_boxes_obj = gt_bboxes_3d[0]
+                    while isinstance(gt_boxes_obj, list):
+                        gt_boxes_obj = gt_boxes_obj[-1]
+                    gt_inds_frame = gt_inds[0][-1]         # Tensor [M], current frame
+                    detected_bboxes = detected_boxes3d[:, :7].to(gt_boxes_obj.tensor)
                     gt_boxes = gt_boxes_obj.tensor[:, :7]
-                    iou_matrix = BboxOverlaps3D(coordinate='lidar')(detected_bboxes, gt_boxes)
-                    for embed_idx in range(len(detected_bboxes)):
-                        best_iou, best_gt = iou_matrix[embed_idx].max(dim=0)
-                        if best_iou.item() > 0.01:
-                            gt_idx = int(best_gt)
-                            if 0 <= gt_idx < len(gt_inds_frame):
-                                track_gt_inds_to_embed_idx[int(gt_inds_frame[gt_idx])] = embed_idx
+                    if gt_boxes.shape[0] > 0:
+                        iou_matrix = BboxOverlaps3D(coordinate='lidar')(detected_bboxes, gt_boxes)
+                        for embed_idx in range(len(detected_bboxes)):
+                            best_iou, best_gt = iou_matrix[embed_idx].max(dim=0)
+                            if best_iou.item() > 0.01:
+                                gt_idx = int(best_gt)
+                                if 0 <= gt_idx < len(gt_inds_frame):
+                                    track_gt_inds_to_embed_idx[int(gt_inds_frame[gt_idx])] = embed_idx
             except Exception as e:
-                import warnings
                 warnings.warn(f'track_gt_inds_to_embed_idx skipped: {e}')
 
         return dict(
