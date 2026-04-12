@@ -51,6 +51,42 @@ CACHED_NUSCENES_PKL = "/home/s56cai/OpenDriveVLA/data/nuscenes/cached_nuscenes_i
 INS_INDS_ADD_1 = True
 
 N_FUTURE = 6
+DEBUG = False  # Toggle: set True (or pass --debug) to print ego past-waypoint diagnostics
+
+
+def get_ego_past_waypoints(nusc, sample_token, n_past=4):
+    """
+    Compute up to n_past past positions of the ego vehicle in the current ego frame.
+
+    Mirrors get_future_waypoints() but walks backward through sample["prev"].
+    Each past ego position is transformed into the current ego frame:
+        p_ego = R_ego^-1 * (p_global - t_ego)
+    then converted to waypoint output frame (x=right, y=forward) via ego_to_waypoint_frame.
+
+    Returns a list of length n_past ordered oldest-first, where each element is either:
+        (float x, float y)  - past ego position in waypoint frame
+        None                - no previous sample exists (padded)
+    """
+    ego_pose = get_ego_pose(nusc, sample_token)
+    ego_translation = np.array(ego_pose["translation"])
+    ego_rotation = Quaternion(ego_pose["rotation"])
+
+    waypoints = []
+    cur = nusc.get("sample", sample_token)
+    for _ in range(n_past):
+        if cur["prev"] == "":
+            waypoints.append(None)
+            # No further prev frames will exist either, but keep padding loop
+        else:
+            cur = nusc.get("sample", cur["prev"])
+            past_pose = get_ego_pose(nusc, cur["token"])
+            past_global = np.array(past_pose["translation"])
+            past_ego = ego_rotation.inverse.rotate(past_global - ego_translation)
+            waypoints.append(ego_to_waypoint_frame(float(past_ego[0]), float(past_ego[1])))
+
+    # Collected newest-first; reverse to oldest-first (same convention as future list)
+    return list(reversed(waypoints))
+
 
 def get_his_trajectory(data_dict: dict) -> str:
     """Extract historical ego trajectory string from a cached_nuscenes_info entry."""
@@ -142,7 +178,7 @@ def format_waypoints(waypoints):
     return "[" + ", ".join(parts) + "]"
 
 
-def convert(split, pth_dir, nusc, cached):
+def convert(split, pth_dir, nusc, cached, debug=False):
     pth_split_dir = os.path.join(pth_dir, split)
 
     pth_files = sorted(fn for fn in os.listdir(pth_split_dir) if fn.endswith(".pth"))
@@ -177,6 +213,14 @@ def convert(split, pth_dir, nusc, cached):
 
         his_msg = get_his_trajectory(cached[sample_token])
 
+        if debug or DEBUG:
+            ego_past = get_ego_past_waypoints(nusc, sample_token)
+            print(
+                f"[DEBUG] sample={sample_token}\n"
+                f"        ego past waypoints (x=right, y=fwd, oldest→newest): "
+                f"{format_waypoints(ego_past)}"
+            )
+
         for raw_ind in track_dict.keys():
             instance_ind = int(raw_ind)
             actual_ind = (instance_ind - 1) if INS_INDS_ADD_1 else instance_ind
@@ -204,6 +248,9 @@ def convert(split, pth_dir, nusc, cached):
                     {"from": "gpt",   "value": format_waypoints(waypoints)},
                 ],
             })
+        
+        if debug or DEBUG:
+            break  # Process only one file in debug mode
 
 
     print(
@@ -222,6 +269,7 @@ def main():
     parser.add_argument("--output_dir", default="data/stage25")
     parser.add_argument("--pth_dir", default=FUSIONAD_PTH_DIR)
     parser.add_argument("--cached_pkl", default=CACHED_NUSCENES_PKL)
+    parser.add_argument("--debug", action="store_true", help="Print ego past-waypoint diagnostics")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -233,7 +281,7 @@ def main():
     print("Loading NuScenes...")
     nusc = NuScenes(version=NUSCENES_VER, dataroot=NUSCENES_ROOT, verbose=False)
 
-    entries = convert(args.split, args.pth_dir, nusc, cached)
+    entries = convert(args.split, args.pth_dir, nusc, cached, debug=args.debug)
 
     out_path = os.path.join(args.output_dir, f"stage25_trajectory_{args.split}.json")
     with open(out_path, "w") as f:
