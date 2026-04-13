@@ -49,43 +49,45 @@ INS_INDS_ADD_1 = True
 _ROLE_MAP = {"user": "human", "assistant": "gpt"}
 
 
-def get_ego_pose(nusc, sample_token):
-    """Return the ego_pose record for a sample (via LIDAR_TOP, same as stage25_converter.py)."""
+def get_lidar_transforms(nusc, sample_token):
+    """
+    Return (ego_t, ego_R, lidar_t, lidar_R) for LIDAR_TOP at sample_token.
+    Mirrors check_cached_agent_hist.py's transform setup.
+    """
     sample = nusc.get("sample", sample_token)
-    sd_token = sample["data"]["LIDAR_TOP"]
-    sd = nusc.get("sample_data", sd_token)
-    return nusc.get("ego_pose", sd["ego_pose_token"])
+    sd = nusc.get("sample_data", sample["data"]["LIDAR_TOP"])
+    ego_pose = nusc.get("ego_pose", sd["ego_pose_token"])
+    cs = nusc.get("calibrated_sensor", sd["calibrated_sensor_token"])
+    ego_t = np.array(ego_pose["translation"])
+    ego_R = Quaternion(ego_pose["rotation"])
+    lidar_t = np.array(cs["translation"])
+    lidar_R = Quaternion(cs["rotation"])
+    return ego_t, ego_R, lidar_t, lidar_R
 
 
-def ego_to_waypoint_frame(x_fwd: float, y_left: float) -> tuple:
-    """
-    Convert from NuScenes ego frame (x=forward, y=left) to
-    waypoint output frame (x=right, y=forward).
-    """
-    return -y_left, x_fwd
+def world_to_lidar(world_pos, ego_t, ego_R, lidar_t, lidar_R):
+    """Global → ego → lidar frame (x=fwd, y=left). Mirrors check_cached_agent_hist.py."""
+    p = ego_R.inverse.rotate(np.array(world_pos) - ego_t)
+    p = lidar_R.inverse.rotate(p - lidar_t)
+    return p[:2]
 
 
 def get_current_bev_coord(nusc, instance_token, sample_token):
     """
     Compute the current ego-relative BEV coordinate for an instance at sample_token.
 
-    Uses the same reference-frame logic as stage25_converter.get_future_waypoints():
-        p_ego = R_ego^-1 * (p_global - t_ego)
-    then converted to waypoint frame (x=right, y=forward).
-
-    Returns (x, y) tuple, or None if the instance is not annotated in this sample.
+    Uses global → ego → lidar transform (Method 2 from check_cached_agent_hist.py),
+    matching the coordinate frame of cached_nuscenes_info.pkl.
+    Returns (x, y) in lidar frame (x=fwd, y=left), or None if not annotated.
     """
-    ego_pose = get_ego_pose(nusc, sample_token)
-    ego_translation = np.array(ego_pose["translation"])
-    ego_rotation = Quaternion(ego_pose["rotation"])
+    ego_t, ego_R, lidar_t, lidar_R = get_lidar_transforms(nusc, sample_token)
 
     sample = nusc.get("sample", sample_token)
     for ann_token in sample["anns"]:
         ann = nusc.get("sample_annotation", ann_token)
         if ann["instance_token"] == instance_token:
-            obj_global = np.array(ann["translation"])
-            obj_ego = ego_rotation.inverse.rotate(obj_global - ego_translation)
-            return ego_to_waypoint_frame(float(obj_ego[0]), float(obj_ego[1]))
+            xy = world_to_lidar(ann["translation"], ego_t, ego_R, lidar_t, lidar_R)
+            return float(xy[0]), float(xy[1])
     return None
 
 
