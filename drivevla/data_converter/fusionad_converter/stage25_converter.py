@@ -54,22 +54,41 @@ N_FUTURE = 6
 DEBUG = False  # Toggle: set True (or pass --debug) to print ego past-waypoint diagnostics
 
 
+def get_lidar_transforms(nusc, sample_token):
+    """
+    Return (ego_t, ego_R, lidar_t, lidar_R) for LIDAR_TOP at sample_token.
+    Mirrors check_cached_agent_hist.py's transform setup.
+    """
+    sample = nusc.get("sample", sample_token)
+    sd = nusc.get("sample_data", sample["data"]["LIDAR_TOP"])
+    ego_pose = nusc.get("ego_pose", sd["ego_pose_token"])
+    cs = nusc.get("calibrated_sensor", sd["calibrated_sensor_token"])
+    ego_t = np.array(ego_pose["translation"])
+    ego_R = Quaternion(ego_pose["rotation"])
+    lidar_t = np.array(cs["translation"])
+    lidar_R = Quaternion(cs["rotation"])
+    return ego_t, ego_R, lidar_t, lidar_R
+
+
+def world_to_lidar(world_pos, ego_t, ego_R, lidar_t, lidar_R):
+    """Global → ego → lidar (mirrors check_cached_agent_hist.py method 2)."""
+    p = ego_R.inverse.rotate(np.array(world_pos) - ego_t)
+    p = lidar_R.inverse.rotate(p - lidar_t)
+    return p[:2]
+
+
 def get_ego_past_waypoints(nusc, sample_token, n_past=4):
     """
-    Compute up to n_past past positions of the ego vehicle in the current ego frame.
+    Compute up to n_past past positions of the ego vehicle in the current lidar frame.
 
-    Mirrors get_future_waypoints() but walks backward through sample["prev"].
-    Each past ego position is transformed into the current ego frame:
-        p_ego = R_ego^-1 * (p_global - t_ego)
-    then converted to waypoint output frame (x=right, y=forward) via ego_to_waypoint_frame.
+    Mirrors check_cached_agent_hist.py method 2: applies the full global→ego→lidar
+    transform chain using both ego pose and calibrated sensor (LIDAR_TOP) transforms.
 
     Returns a list of length n_past ordered oldest-first, where each element is either:
-        (float x, float y)  - past ego position in waypoint frame
+        (float x, float y)  - past ego position in lidar frame (x=fwd, y=left)
         None                - no previous sample exists (padded)
     """
-    ego_pose = get_ego_pose(nusc, sample_token)
-    ego_translation = np.array(ego_pose["translation"])
-    ego_rotation = Quaternion(ego_pose["rotation"])
+    ego_t, ego_R, lidar_t, lidar_R = get_lidar_transforms(nusc, sample_token)
 
     waypoints = []
     cur = nusc.get("sample", sample_token)
@@ -81,8 +100,8 @@ def get_ego_past_waypoints(nusc, sample_token, n_past=4):
             cur = nusc.get("sample", cur["prev"])
             past_pose = get_ego_pose(nusc, cur["token"])
             past_global = np.array(past_pose["translation"])
-            past_ego = ego_rotation.inverse.rotate(past_global - ego_translation)
-            waypoints.append(ego_to_waypoint_frame(float(past_ego[0]), float(past_ego[1])))
+            xy = world_to_lidar(past_global, ego_t, ego_R, lidar_t, lidar_R)
+            waypoints.append((float(xy[0]), float(xy[1])))
 
     # Collected newest-first; reverse to oldest-first (same convention as future list)
     return list(reversed(waypoints))
@@ -116,28 +135,26 @@ def get_ego_pose(nusc, sample_token):
 
 def get_future_waypoints(nusc, instance_token, sample_token, n_future=N_FUTURE):
     """
-    Compute up to n_future future positions of an instance in the ego frame of sample_token.
+    Compute up to n_future future positions of an instance in the lidar frame of sample_token.
 
-    The ego frame is fixed to the current sample (same reference as object_relative_pose.py):
-        p_ego = R_ego^-1 * (p_global - t_ego)
+    Uses the full global → ego → lidar transform chain (same as check_cached_agent_hist.py
+    method 2 / vis_object.py):
+        p_lidar = R_lidar^-1 * (R_ego^-1 * (p_global - t_ego) - t_lidar)
 
     Returns a list of length n_future where each element is either:
-        (float x, float y)  - ego-relative position of the object in a future frame
+        (float x, float y)  - position in lidar frame (x=fwd, y=left)
         None                - no annotation exists (will be formatted as (UN, UN))
 
     Returns None if the instance has no annotation in sample_token (entry should be skipped).
     """
-    # Current ego pose used as the fixed reference frame for all waypoints
-    ego_pose = get_ego_pose(nusc, sample_token)
-    ego_translation = np.array(ego_pose["translation"])
-    ego_rotation = Quaternion(ego_pose["rotation"])
+    ego_t, ego_R, lidar_t, lidar_R = get_lidar_transforms(nusc, sample_token)
 
     # Build instance_token → annotation token map for this sample
     sample = nusc.get("sample", sample_token)
-    ann_map = {}
-    for ann_token in sample["anns"]:
-        ann = nusc.get("sample_annotation", ann_token)
-        ann_map[ann["instance_token"]] = ann_token
+    ann_map = {
+        nusc.get("sample_annotation", tok)["instance_token"]: tok
+        for tok in sample["anns"]
+    }
 
     if instance_token not in ann_map:
         return None  # instance not annotated in this sample – skip entry
@@ -151,9 +168,8 @@ def get_future_waypoints(nusc, instance_token, sample_token, n_future=N_FUTURE):
             waypoints.append(None)
         else:
             ann = nusc.get("sample_annotation", next_tok)
-            obj_global = np.array(ann["translation"])
-            obj_ego = ego_rotation.inverse.rotate(obj_global - ego_translation)
-            waypoints.append(ego_to_waypoint_frame(float(obj_ego[0]), float(obj_ego[1])))
+            xy = world_to_lidar(ann["translation"], ego_t, ego_R, lidar_t, lidar_R)
+            waypoints.append((float(xy[0]), float(xy[1])))
             next_tok = ann["next"]
 
     return waypoints
