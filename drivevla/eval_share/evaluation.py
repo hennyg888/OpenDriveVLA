@@ -39,10 +39,16 @@ def planning_evaluation(pred_trajs_dict, subset=None, only_vehicle=True):
     with open(os.path.join(current_dir, 'gt/gt_traj_mask.pkl'), 'rb') as f:
         gt_trajs_mask_dict = pickle.load(f)
     
-    if subset:
-        test_tokens = subset
-
+    skipped_eval = 0
+    skipped_subset = 0
     for index, token in enumerate(tqdm(gt_trajs_dict.keys())):
+        if subset is not None and token not in subset:
+            skipped_subset += 1
+            continue
+        if token+'_trajectory' not in pred_trajs_dict:
+            skipped_eval += 1
+            continue
+
         gt_trajectory =  torch.tensor(gt_trajs_dict[token])
         gt_trajectory = gt_trajectory.to(device)
 
@@ -71,7 +77,11 @@ def planning_evaluation(pred_trajs_dict, subset=None, only_vehicle=True):
         metric_planning_val(output_trajs[:, :ts], gt_trajectory[:, :ts], occupancy[:, :ts], token, gt_traj_mask) 
 
     print("\n-------------------------------------------------------------------")
-    print(f"Processed total {len(gt_trajs_dict)} samples")
+    print(
+        f"Processed total {len(gt_trajs_dict)} samples, "
+        f"skipped {skipped_eval} (no valid prediction), "
+        f"{skipped_subset} (invalid future mask)"
+    )
 
     results = {}
     scores = metric_planning_val.compute()

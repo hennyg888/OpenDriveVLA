@@ -58,11 +58,16 @@ class LLaVANuScenesDataset(NuScenesE2EDataset):
         if self.use_uniad_pth:
             self.in_nuscenes_order = False
         if self.test_mode == True:
-            self.ins_inds_add_1_in_pipeline = NuScenesE2EDataset_config['pipeline'][3]['ins_inds_add_1']
             self.nusc_split = 'val'
         else:
-            self.ins_inds_add_1_in_pipeline = NuScenesE2EDataset_config['pipeline'][2]['ins_inds_add_1']
             self.nusc_split = 'train'
+        # Search pipeline dynamically for ins_inds_add_1 (index varies between
+        # UniAD and FusionAD pipelines due to extra LiDAR loading steps).
+        self.ins_inds_add_1_in_pipeline = False
+        for step in NuScenesE2EDataset_config['pipeline']:
+            if 'ins_inds_add_1' in step:
+                self.ins_inds_add_1_in_pipeline = step['ins_inds_add_1']
+                break
 
         self.list_data_dict = []
         if self.data_args.data_path is None:
@@ -163,20 +168,39 @@ class LLaVANuScenesDataset(NuScenesE2EDataset):
         return list_data_dict
     
     def _reorder_data_dict(self, list_data_dict):
-        sample_token_to_idx = {}
         if self.in_nuscenes_order:
+            sample_token_to_idx = {}
             for i, data_dict in enumerate(list_data_dict):
                 sample_token = data_dict.get('id', data_dict.get('qa_id')).split('_')[0]
                 sample_token_to_idx[sample_token] = i
 
-            # Reorder the list_data_dict to match the order of Nuscenes data_infos
-            for i in range(len(self.data_infos)):
-                sample_token = self.data_infos[i]['token']
-                try:
-                    self.list_data_dict.append(list_data_dict[sample_token_to_idx[sample_token]])
-                except:
-                    self.list_data_dict.append({"id": sample_token, "conversations": [{"role": "user", "value": "This sample does not have a conversation."}]})
-                    print(f"!!! sample_token '{sample_token}' not found in <sample_token_to_idx>, meaning this sample is not in the conversation data. Please check the conversation data.")
+            # Filter data_infos to stay aligned with list_data_dict.
+            # Always drop tokens missing from the conversation JSON (no placeholders).
+            # In training mode, additionally drop tokens whose 6-step ego future
+            # mask is not fully valid — these are scene-tail samples whose labels
+            # are zero-padded and would poison training. Test/inference mode keeps
+            # every sample so inference runs on the full val set.
+            filtered_infos = []
+            dropped_no_conv = 0
+            dropped_invalid_future = 0
+            for info in self.data_infos:
+                token = info['token']
+                if token not in sample_token_to_idx:
+                    dropped_no_conv += 1
+                    continue
+                if not self.test_mode:
+                    cached = self.cached_nuscenes_data.get(token)
+                    if cached is None or not np.all(cached['gt_ego_fut_masks'] == 1):
+                        dropped_invalid_future += 1
+                        continue
+                filtered_infos.append(info)
+                self.list_data_dict.append(list_data_dict[sample_token_to_idx[token]])
+            self.data_infos = filtered_infos
+            rank0_print(
+                f"[LLaVANuScenesDataset] kept {len(filtered_infos)} samples; "
+                f"dropped {dropped_no_conv} (no conv), "
+                f"{dropped_invalid_future} (invalid future, train only)"
+            )
         else:
             self.list_data_dict = list_data_dict
 

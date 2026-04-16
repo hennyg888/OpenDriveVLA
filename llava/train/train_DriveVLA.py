@@ -29,6 +29,53 @@ from drivevla.data_utils.nuscenes_llava_datacollector import DataCollatorForLLaV
 
 from llava.constants import DEFAULT_TRAJ_TOKEN, DEFAULT_TRACK_START_TOKEN, DEFAULT_TRACK_END_TOKEN, DEFAULT_TRAJ_START_TOKEN, DEFAULT_TRAJ_END_TOKEN, DEFAULT_SCENE_START_TOKEN, DEFAULT_SCENE_END_TOKEN, DEFAULT_MAP_START_TOKEN, DEFAULT_MAP_END_TOKEN, DEFAULT_EGO_START_TOKEN, DEFAULT_EGO_END_TOKEN, DEFAULT_COMMAND_START_TOKEN, DEFAULT_COMMAND_END_TOKEN, DEFAULT_QUESTION_START, DEFAULT_QUESTION_END, DEFAULT_ANSWER_START, DEFAULT_ANSWER_END
 
+from transformers import TrainerCallback
+
+
+class FrozenBackboneFP32Callback(TrainerCallback):
+    """After DeepSpeed bf16 engine initialization casts all parameters to
+    bfloat16, permanently revert the frozen LiDAR-specific submodules to
+    float32.
+
+    Only the LiDAR pipeline modules are reverted, because the mmcv custom
+    CUDA ops they use (hard_voxelize_kernel, indice_subm_conv) do not support
+    bfloat16 and will raise NotImplementedError/RuntimeError.
+
+    img_backbone (ResNet) and img_neck run fine in bf16 via standard PyTorch
+    ops and must stay bf16 so their outputs are compatible with the bf16 BEV
+    transformer downstream.
+
+    DeepSpeed's BF16Optimizer only manages *trainable* parameters, so frozen
+    modules (requires_grad=False) will not be cast back to bf16 after each
+    optimizer step — the float32 cast is permanent for the duration of training.
+    """
+
+    def on_train_begin(self, args, state, control, model=None, **kwargs):
+        if model is None:
+            return control
+        # Navigate through potential DeepSpeed engine wrappers.
+        inner = model
+        for _ in range(3):  # unwrap up to 3 levels (.module)
+            inner = getattr(inner, 'module', inner)
+        if not hasattr(inner, 'get_model'):
+            return control
+        lm = inner.get_model()
+        vt = lm.get_vision_tower() if hasattr(lm, 'get_vision_tower') else None
+        if vt is None:
+            return control
+        vm = getattr(vt, 'vision_model', None)
+        if vm is None:
+            return control
+        # Only LiDAR-specific modules need float32; img_backbone/img_neck must
+        # stay bf16 so their outputs are compatible with the bf16 BEV transformer.
+        _LIDAR_FP32_MODULES = ('pts_backbone', 'pts_voxel_layer',
+                               'pts_voxel_encoder', 'pts_middle_encoder')
+        for attr in _LIDAR_FP32_MODULES:
+            m = getattr(vm, attr, None)
+            if m is not None:
+                m.float()
+                rank0_print(f"[FrozenBackboneFP32Callback] Cast {attr} → float32")
+
 def train_DriveVLA(attn_implementation=None):
     torch.manual_seed(42)
     global local_rank
@@ -282,7 +329,15 @@ def train_DriveVLA(attn_implementation=None):
                 for name, param in model.named_parameters():
                     if "vision_tower" in name:
                         param.requires_grad_(True)
-            if "mm_language_model" in tunable_parts:
+                # Re-freeze image and LiDAR encoder modules inside the vision tower.
+                # Mirrors FusionAD's freeze_img_modules=True convention:
+                #   img_backbone + img_neck frozen together (FPN tightly coupled with backbone)
+                #   pts_backbone frozen (LiDAR encoder)
+                # Only transformer heads, seg_head, query modules etc. remain trainable.
+                for name, param in model.named_parameters():
+                    if "img_backbone" in name or "img_neck" in name or "pts_backbone" in name:
+                        param.requires_grad_(False)
+            if "mm_language_model" in tunable_parts:  # must pass "mm_language_model", NOT "language_model"
                 for name, param in model.named_parameters():
                     if "vision_tower" not in name and "mm_projector_track" not in name and "mm_projector_scene" not in name and "mm_projector_map" not in name and "vision_resampler" not in name:
                         param.requires_grad_(True)
@@ -320,13 +375,16 @@ def train_DriveVLA(attn_implementation=None):
                     if training_args.bf16 and module.weight.dtype == torch.float32:
                         module = module.to(torch.bfloat16)
     
-    uniad_cfg: Config = Config.fromfile("projects/configs/stage1_track_map/base_track_map.py")
-    
+    _nuscenes_cfg_file = getattr(data_args, "nuscenes_cfg_file",
+                                  "projects/configs/stage1_track_map/base_track_map.py")
+    uniad_cfg: Config = Config.fromfile(_nuscenes_cfg_file)
+
     train_dataset = LLaVANuScenesDataset(tokenizer, data_args, uniad_cfg.data.train_llava_and_vision_tower, llava_train_mode=True, use_uniad_pth=data_args.use_uniad_pth, in_nuscenes_order=data_args.in_nuscenes_order, skip_build_conversation=data_args.skip_build_conversation)
     # train_dataset = LLaVANuScenesDataset(tokenizer, data_args, uniad_cfg.data.train_llava_without_track_gt, llava_train_mode=True, use_uniad_pth=data_args.use_uniad_pth, in_nuscenes_order=data_args.in_nuscenes_order)
     data_collator = DataCollatorForLLaVANuScenesDataset(tokenizer=tokenizer, llava_train_mode=True)
     
     trainer = LLaVATrainer(model=model, tokenizer=tokenizer, args=training_args, train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
+    trainer.add_callback(FrozenBackboneFP32Callback())
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)

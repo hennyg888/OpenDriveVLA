@@ -171,7 +171,7 @@ def inference_planning_oriented_vlm(args):
     tokenizer, model_engine, image_processor, context_len = load_model_with_deepspeed(args, device)
     model_engine.eval()
 
-    uniad_cfg: Config = Config.fromfile("projects/configs/stage1_track_map/base_track_map.py")
+    uniad_cfg: Config = Config.fromfile("projects/configs/fusionad/fusion_base_track_map.py")
     data_args = DataArguments(
         data_path=args.data,
         lazy_preprocess=True,

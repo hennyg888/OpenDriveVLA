@@ -1,10 +1,22 @@
 import argparse
 import json
 import os
+import pickle
 import sys
+
+import numpy as np
 
 from utils.trajectory_utils import retrieve_traj, check_traj
 from eval_share.evaluation import planning_evaluation
+
+CACHED_NUSCENES_PKL = "data/nuscenes/cached_nuscenes_info.pkl"
+
+
+def load_valid_tokens(pkl_path=CACHED_NUSCENES_PKL):
+    """Return the set of sample tokens whose 6-step ego future is fully valid."""
+    with open(pkl_path, "rb") as f:
+        cached = pickle.load(f)
+    return {t for t, d in cached.items() if np.all(d["gt_ego_fut_masks"] == 1)}
 
 def evaluate_planning_oriented_vlm(output_path):
     '''
@@ -15,20 +27,36 @@ def evaluate_planning_oriented_vlm(output_path):
     pred_trajs_dict = {}
     pred_trajs_multi_modal_dict = {}
 
+    skipped = 0
     with open(output_path, 'r') as f:
         for line in f:
             conv_result = json.loads(line.strip())
 
             # retrieve multi-modal planning trajectories
             traj_multi_modal = []
+            valid = True
             for answer in conv_result['answer']:
                 traj = retrieve_traj(answer)
-                check_traj(traj)
+                if traj is None:
+                    valid = False
+                    break
+                try:
+                    check_traj(traj)
+                except AssertionError:
+                    valid = False
+                    break
                 traj_multi_modal.append(traj)
+
+            if not valid or len(traj_multi_modal) == 0:
+                skipped += 1
+                continue
 
             # TODO: pick the best planning trajectory
             pred_trajs_dict[conv_result['id']] = [traj_multi_modal[0]]
             pred_trajs_multi_modal_dict[conv_result['id']] = traj_multi_modal
+
+    if skipped > 0:
+        print(f"[WARNING] Skipped {skipped} samples with no valid trajectory in model output.")
 
     # Save pred_trajs_dict to a json file
     with open(os.path.join(out_dir, "pred_trajs_dict.json"), 'w') as f:
@@ -53,7 +81,9 @@ def evaluate_planning_oriented_vlm(output_path):
     If you want to report the STP-3 metric, please set only_vehicle=False.
     if you want to report the UniAD metric, please set only_vehicle=True.
     """
-    planning_evaluation(pred_trajs_dict, subset=None, only_vehicle=True)
+    valid_tokens = load_valid_tokens()
+    print(f"[eval] restricting metrics to {len(valid_tokens)} tokens with fully valid 6-step futures")
+    planning_evaluation(pred_trajs_dict, subset=valid_tokens, only_vehicle=True)
     
     # Restore stdout and print log contents
     sys.stdout.close()

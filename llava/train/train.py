@@ -133,6 +133,7 @@ class DataArguments:
     in_nuscenes_order: bool = field(default=True)
     use_uniad_pth: bool = field(default=True)
     skip_build_conversation: bool = field(default=False)
+    nuscenes_cfg_file: str = field(default="projects/configs/stage1_track_map/base_track_map.py")
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
