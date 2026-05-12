@@ -38,6 +38,8 @@ def retrieve_traj(text: str) -> List[Tuple[float, float]]:
 
     coord_pairs = re.findall(r'[\[\(]([-\deE.+]+),\s*([-\deE.+]+)[\]\)]', text)
     coords_list = [(float(x), float(y)) for x, y in coord_pairs]
+    if len(coords_list) == 0:
+        return None
     if len(coords_list) < 6:
         for i in range(6 - len(coords_list)):
             coords_list.append(coords_list[-1])

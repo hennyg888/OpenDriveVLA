@@ -1088,14 +1088,15 @@ class PansegformerHead(SegDETRHead):
                 - pred_seg_dict (dict): Dictionary of predicted segmentation outputs.
         """
         pred_seg_dict = self(bev_feat)
-        results = self.get_bboxes(pred_seg_dict['outputs_classes'],
-                                    pred_seg_dict['outputs_coords'],
-                                    pred_seg_dict['enc_outputs_class'],
-                                    pred_seg_dict['enc_outputs_coord'],
-                                    pred_seg_dict['args_tuple'],
-                                    pred_seg_dict['reference'],
-                                    img_metas,
-                                    rescale=True)
+        with torch.no_grad():
+            results = self.get_bboxes(pred_seg_dict['outputs_classes'],
+                                        pred_seg_dict['outputs_coords'],
+                                        pred_seg_dict['enc_outputs_class'],
+                                        pred_seg_dict['enc_outputs_coord'],
+                                        pred_seg_dict['args_tuple'],
+                                        pred_seg_dict['reference'],
+                                        img_metas,
+                                        rescale=True)
         loss_inputs = [
             pred_seg_dict['outputs_classes'],
             pred_seg_dict['outputs_coords'],
@@ -1107,8 +1108,7 @@ class PansegformerHead(SegDETRHead):
             gt_lane_bboxes,
             gt_lane_masks
         ]
-        # losses_seg = self.loss(*loss_inputs, img_metas=img_metas)
-        losses_seg = {}
+        losses_seg = self.loss(*loss_inputs, img_metas=img_metas)
         return losses_seg, results
 
     def _get_bboxes_single(self,

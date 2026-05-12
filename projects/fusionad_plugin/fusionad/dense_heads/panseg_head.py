@@ -1061,6 +1061,9 @@ class PansegformerHead(SegDETRHead):
             result_dict['pts_bbox'] = pts_bbox
             result_dict['ret_iou'] = ret_iou
             result_dict['args_tuple'] = pred_seg_dict['args_tuple']
+            result_dict['output_query_things']        = pts_bbox['output_query_things']
+            result_dict['output_query_stuff']         = pts_bbox['output_query_stuff']
+            result_dict['chosen_output_query_things'] = pts_bbox['chosen_output_query_things']
         return bbox_list
 
 
@@ -1166,6 +1169,9 @@ class PansegformerHead(SegDETRHead):
         lane_list = []
         lane_score_list = []
         score_list = []
+        output_query_things_list = []
+        output_query_stuff_list = []
+        chosen_output_query_things_list = []
         for img_id in range(len(img_metas)):
             cls_score = cls_scores[img_id]
             bbox_pred = bbox_preds[img_id]
@@ -1205,6 +1211,9 @@ class PansegformerHead(SegDETRHead):
                 None,
                 stuff_query_pos,
                 hw_lvl=hw_lvl)
+
+            output_query_things = query_inter_things[-1].squeeze(0)  # [N_things, D]
+            output_query_stuff  = query_inter_stuff[-1].squeeze(0)   # [N_stuff,  D]
 
             attn_map = torch.cat([mask_things, mask_stuff], 1)
             attn_map = attn_map.squeeze(-1)  # BS, NQ, N_head,LEN
@@ -1263,6 +1272,7 @@ class PansegformerHead(SegDETRHead):
             id_unique = 1
             lane = torch.zeros((self.num_things_classes, *mask_pred.shape[-2:]), device=mask_pred.device).to(torch.long)
             lane_score =  torch.zeros((self.num_things_classes, *mask_pred.shape[-2:]), device=mask_pred.device).to(mask_pred.dtype)
+            chosen_output_query_things_index = []
             for i, scores in enumerate(scores_all):
                 # MDS: things and sutff have different threholds may perform a little bit better
                 if labels_all[i] < self.num_things_classes and scores < self.quality_threshold_things:
@@ -1289,6 +1299,7 @@ class PansegformerHead(SegDETRHead):
                     lane_score[labels_all[i], _mask] = masks_all[i][_mask]
                     results[1, _mask] = id_unique
                     id_unique += 1
+                chosen_output_query_things_index.append(i)
 
             file_name = img_metas[img_id]['pts_filename'].split('/')[-1].split('.')[0]
             panoptic_list.append(
@@ -1299,6 +1310,10 @@ class PansegformerHead(SegDETRHead):
             seg_list.append(seg_th)
             lane_list.append(lane)
             lane_score_list.append(lane_score)
+            output_query_things_list.append(output_query_things)
+            output_query_stuff_list.append(output_query_stuff)
+            chosen_output_query_things = output_query_things[chosen_output_query_things_index]
+            chosen_output_query_things_list.append(chosen_output_query_things)
         results = []
         for i in range(len(img_metas)):
             results.append({
@@ -1311,5 +1326,8 @@ class PansegformerHead(SegDETRHead):
                 'lane': lane_list[i],
                 'lane_score': lane_score_list[i],
                 'stuff_score_list' : stuff_score_list[i],
+                'output_query_things' : output_query_things_list[i],
+                'output_query_stuff' : output_query_stuff_list[i],
+                'chosen_output_query_things' : chosen_output_query_things_list[i],
             })
         return results

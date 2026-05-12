@@ -151,21 +151,27 @@ def generate_user_message(data_dict):
     return ego_message, his_message, cmd_message, traj_message
 
 
-def build_llava_conversation(data_sample, cached_nuscenes_data):
+def build_llava_conversation(data_sample, cached_nuscenes_data,
+                             include_ego_history: bool = True):
 
     sample_token = data_sample.get('id', data_sample.get('qa_id')).split('_')[0]
     value = cached_nuscenes_data[sample_token]
 
     ego_message, his_message, cmd_message, traj_message = generate_user_message(value)
+
+    ego_line = f"Ego states: {ego_message}\n" if include_ego_history else ""
+    his_line = (f"Historical trajectory (last 2 seconds): {his_message}\n"
+                if include_ego_history else "")
+
     data_sample['conversations'][0]['value'] = (
         f"Scene information: {DEFAULT_SCENE_START_TOKEN}{DEFAULT_SCENE_TOKEN}{DEFAULT_SCENE_END_TOKEN}\n"
         f"Object-wise tracking information: {DEFAULT_TRACK_START_TOKEN}{DEFAULT_TRACK_TOKEN}{DEFAULT_TRACK_END_TOKEN}\n"
         f"Map information: {DEFAULT_MAP_START_TOKEN}{DEFAULT_MAP_TOKEN}{DEFAULT_MAP_END_TOKEN}\n"
-        f"Ego states: {ego_message}\n"
-        f"Historical trajectory (last 2 seconds): {his_message}\n"
+        f"{ego_line}"
+        f"{his_line}"
         f"Mission goal: {cmd_message}\n"
         f"Planning trajectory: {DEFAULT_TRAJ_TOKEN}"
     )
     data_sample['conversations'][1]['value'] = f"{DEFAULT_TRAJ_START_TOKEN}{traj_message}{DEFAULT_TRAJ_END_TOKEN}"
-        
+
     return data_sample

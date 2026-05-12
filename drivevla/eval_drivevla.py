@@ -18,7 +18,7 @@ def load_valid_tokens(pkl_path=CACHED_NUSCENES_PKL):
         cached = pickle.load(f)
     return {t for t, d in cached.items() if np.all(d["gt_ego_fut_masks"] == 1)}
 
-def evaluate_planning_oriented_vlm(output_path):
+def evaluate_planning_oriented_vlm(output_path, include_end_of_scene=False):
     '''
     Convert the planning results from conversations to pred_trajs_dict and pred_trajs_multi_modal_dict
     '''
@@ -81,9 +81,14 @@ def evaluate_planning_oriented_vlm(output_path):
     If you want to report the STP-3 metric, please set only_vehicle=False.
     if you want to report the UniAD metric, please set only_vehicle=True.
     """
-    valid_tokens = load_valid_tokens()
-    print(f"[eval] restricting metrics to {len(valid_tokens)} tokens with fully valid 6-step futures")
-    planning_evaluation(pred_trajs_dict, subset=valid_tokens, only_vehicle=True)
+    if include_end_of_scene:
+        print("[eval] --include-end-of-scene: evaluating on ALL val tokens "
+              "(no fut_mask filter)")
+        planning_evaluation(pred_trajs_dict, subset=None, only_vehicle=True)
+    else:
+        valid_tokens = load_valid_tokens()
+        print(f"[eval] restricting metrics to {len(valid_tokens)} tokens with fully valid 6-step futures")
+        planning_evaluation(pred_trajs_dict, subset=valid_tokens, only_vehicle=True)
     
     # Restore stdout and print log contents
     sys.stdout.close()
@@ -97,9 +102,17 @@ def evaluate_planning_oriented_vlm(output_path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=str, default=None)
+    parser.add_argument(
+        "--include-end-of-scene",
+        action="store_true",
+        help="Include val samples whose 6-step ego future walks past "
+             "end of scene (default: filter them out).",
+    )
     args = parser.parse_args()
 
-    evaluate_planning_oriented_vlm(args.output)
+    evaluate_planning_oriented_vlm(
+        args.output, include_end_of_scene=args.include_end_of_scene
+    )
     print(f">>> Evaluation results saved to {os.path.dirname(args.output)}")
 
 if __name__ == "__main__":

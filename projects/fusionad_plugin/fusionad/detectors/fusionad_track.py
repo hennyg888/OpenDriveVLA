@@ -16,16 +16,17 @@ from mmdet.models import DETECTORS
 from mmdet3d.core import bbox3d2result
 from mmdet3d.core.bbox.coders import build_bbox_coder
 from mmdet3d.models.detectors.mvx_two_stage import MVXTwoStageDetector
-from projects.fusionad_plugin.models.utils.grid_mask import GridMask
+from projects.fusionad_plugin_new.models.utils.grid_mask import GridMask
 import copy
 import math
-from projects.fusionad_plugin.core.bbox.util import normalize_bbox
+import os
+from projects.fusionad_plugin_new.core.bbox.util import normalize_bbox
 from mmdet.models import build_loss
 from einops import rearrange
 from mmdet.models.utils.transformer import inverse_sigmoid
 from ..dense_heads.track_head_plugin import MemoryBank, QueryInteractionModule, Instances, RuntimeTrackerBase
 
-@DETECTORS.register_module()
+@DETECTORS.register_module(force=True)
 class FusionADTrack(MVXTwoStageDetector):
     """UniAD tracking part
     """
@@ -121,6 +122,10 @@ class FusionADTrack(MVXTwoStageDetector):
             "prev_pos": 0,
             "prev_angle": 0,
         }
+        # Debug counter: tracker state is wiped whenever scene_token changes
+        # (or on the very first sample). Across a whole split the final value
+        # should equal the number of scenes processed on this rank.
+        self._track_wipe_count = 0
         self.query_embedding = nn.Embedding(self.num_query+1, self.embed_dims * 2) 
         self.reference_points = nn.Linear(self.embed_dims, 3)
         self.bbox_size_fc = nn.Linear(self.embed_dims, 3)
@@ -167,6 +172,10 @@ class FusionADTrack(MVXTwoStageDetector):
     def voxelize(self, points):
         feats, coords, sizes = [], [], []
         for k, res in enumerate(points):
+            # hard_voxelize_kernel only supports float32; cast explicitly because
+            # @force_fp32() doesn't recurse into list elements.
+            if res.dtype != torch.float32:
+                res = res.float()
             f, c, n = self.pts_voxel_layer(res)
             feats.append(f)
             coords.append(F.pad(c, (1, 0), mode="constant", value=k))
@@ -186,8 +195,19 @@ class FusionADTrack(MVXTwoStageDetector):
     def extract_pts_feat(self, pts):
         feats, coords, sizes = self.voxelize(pts)
         batch_size = coords[-1, 0] + 1
+        # mmcv sparse conv kernels only support float32/float16, not bfloat16.
+        # DeepSpeed bf16 training casts all params to bf16, so temporarily revert
+        # pts_backbone to float32 for this call (it is frozen, so this is safe).
+        _backbone_bf16 = next(self.pts_backbone.parameters()).dtype == torch.bfloat16
+        if _backbone_bf16:
+            self.pts_backbone.float()
         x = self.pts_backbone(feats, coords, batch_size)
-
+        if _backbone_bf16:
+            self.pts_backbone.bfloat16()
+            # Cast output back to bf16 so downstream bf16 modules (BEV encoder,
+            # pts_cross_attention) receive the correct dtype.
+            if isinstance(x, torch.Tensor):
+                x = x.bfloat16()
         return x
 
     def extract_img_feat(self, img, len_queue=None):
@@ -400,8 +420,13 @@ class FusionADTrack(MVXTwoStageDetector):
             prev_bev = self.get_history_bev(prev_img, prev_img_metas, prev_points=prev_points)
 
         img_feats = self.extract_feat(img=imgs)
+        if getattr(self, 'zero_camera', False):
+            img_feats = [torch.zeros_like(f) for f in img_feats]
+
         if points is not None:
             pts_feats = self.extract_pts_feat(points)
+            if getattr(self, 'zero_lidar', False):
+                pts_feats = torch.zeros_like(pts_feats)
         else:
             pts_feats = None
 
@@ -801,6 +826,13 @@ class FusionADTrack(MVXTwoStageDetector):
             self.test_track_instances is None
             or img_metas[0]["scene_token"] != self.scene_token
         ):
+            self._track_wipe_count += 1
+            _rank_env = os.environ.get('RANK', '0')
+            print(
+                f"[track-wipe rank={_rank_env} count={self._track_wipe_count}] "
+                f"scene_token={img_metas[0]['scene_token']}",
+                flush=True,
+            )
             self.timestamp = timestamp
             self.scene_token = img_metas[0]["scene_token"]
             self.prev_bev = None

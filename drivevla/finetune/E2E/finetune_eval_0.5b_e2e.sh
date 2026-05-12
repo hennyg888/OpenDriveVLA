@@ -56,7 +56,7 @@ ACCELERATE_CPU_AFFINITY=0 torchrun --nproc_per_node=4 \
     --mm_use_im_patch_token False \
     --group_by_modality_length True \
     --mm_patch_merge_type spatial_unpad \
-    --bf16 True \
+    --bf16 False \
     --run_name $BASE_RUN_NAME \
     --output_dir ${SAVE_CKPT_DIR} \
     --num_train_epochs 1 \

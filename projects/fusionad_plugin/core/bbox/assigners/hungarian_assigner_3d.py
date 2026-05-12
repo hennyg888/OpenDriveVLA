@@ -5,7 +5,7 @@ from mmdet.core.bbox.assigners import AssignResult
 from mmdet.core.bbox.assigners import BaseAssigner
 from mmdet.core.bbox.match_costs import build_match_cost
 from mmdet.models.utils.transformer import inverse_sigmoid
-from projects.fusionad_plugin.core.bbox.util import normalize_bbox
+from projects.fusionad_plugin_new.core.bbox.util import normalize_bbox
 
 try:
     from scipy.optimize import linear_sum_assignment

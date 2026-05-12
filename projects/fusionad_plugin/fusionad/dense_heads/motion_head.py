@@ -12,7 +12,7 @@ import torch
 import copy
 from mmdet.models import HEADS
 from mmcv.runner import force_fp32, auto_fp16
-from projects.mmdet3d_plugin.models.utils.functional import (
+from projects.fusionad_plugin_new.models.utils.functional import (
     bivariate_gaussian_activation,
     norm_points,
     pos2posemb2d,

@@ -22,7 +22,7 @@ from mmcv.cnn.bricks.transformer import build_attention, build_feedforward_netwo
 from mmcv.cnn.bricks.drop import build_dropout
 from mmcv.runner.base_module import BaseModule, ModuleList, Sequential
 from mmcv.utils import ConfigDict, deprecated_api_warning
-from projects.fusionad_plugin.fusionad.modules.multi_scale_deformable_attn_function import MultiScaleDeformableAttnFunction_fp32
+from projects.fusionad_plugin_new.fusionad.modules.multi_scale_deformable_attn_function import MultiScaleDeformableAttnFunction_fp32
 
 
 @TRANSFORMER_LAYER.register_module()

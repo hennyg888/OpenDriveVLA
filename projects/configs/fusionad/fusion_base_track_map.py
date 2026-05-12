@@ -2,7 +2,7 @@ _base_ = ["../_base_/datasets/nus-3d.py",
           "../_base_/default_runtime.py"]
 
 plugin = True
-plugin_dir = "projects/fusionad_plugin/"
+plugin_dir = "projects/fusionad_plugin_vla/"
 # If point cloud range is changed, the models should also change their point
 # cloud range accordingly
 point_cloud_range = [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
@@ -588,6 +588,77 @@ train_fusionad_with_track_gt_pipeline = [
         ],
     ),
 ]
+train_fusionad_e2e_pipeline = [
+    # LiDAR loading
+    dict(
+        type='LoadPointsFromFile',
+        coord_type='LIDAR',
+        load_dim=5,
+        use_dim=5,
+        file_client_args=file_client_args),
+    dict(
+        type='LoadPointsFromMultiSweeps',
+        sweeps_num=lidar_sweep_num - 1,
+        use_dim=[0, 1, 2, 3, 4],
+        pad_empty_sweeps=True,
+        remove_close=True),
+    dict(type='PointsRangeFilter', point_cloud_range=point_cloud_range),
+    dict(type='PointShuffle'),
+    # Image loading (no photometric augmentation for determinism)
+    dict(type='LoadMultiViewImageFromFilesInCeph', to_float32=True,
+         file_client_args=file_client_args, img_root=data_root),
+    dict(type='NormalizeMultiviewImage', **img_norm_cfg),
+    dict(type='PadMultiViewImage', size_divisor=32),
+    # Annotation loading
+    dict(type='LoadAnnotations3D_E2E',
+         with_bbox_3d=True,
+         with_label_3d=True,
+         with_attr_label=False,
+         with_future_anns=True,
+         with_ins_inds_3d=True,
+         ins_inds_add_1=True),
+    dict(type='GenerateOccFlowLabels', grid_conf=occflow_grid_conf,
+         ignore_index=255, only_vehicle=True, filter_invisible=False),
+    dict(type='ObjectRangeFilterTrack', point_cloud_range=point_cloud_range),
+    dict(type='ObjectNameFilterTrack', classes=class_names),
+    # No MultiScaleFlipAug3D — DefaultFormatBundle3D directly so outputs are
+    # DataContainers (required by prepare_train_data in test_mode=False).
+    dict(type='DefaultFormatBundle3D', class_names=class_names),
+    dict(type='CustomCollect3D', keys=[
+        'img',
+        'points',
+        'timestamp',
+        'l2g_r_mat',
+        'l2g_t',
+        'gt_bboxes_3d',
+        'gt_labels_3d',
+        'gt_inds',
+        'gt_fut_traj',
+        'gt_fut_traj_mask',
+        'gt_past_traj',
+        'gt_past_traj_mask',
+        'gt_sdc_bbox',
+        'gt_sdc_label',
+        'gt_sdc_fut_traj',
+        'gt_sdc_fut_traj_mask',
+        'gt_lane_labels',
+        'gt_lane_bboxes',
+        'gt_lane_masks',
+        'gt_segmentation',
+        'gt_instance',
+        'gt_centerness',
+        'gt_offset',
+        'gt_flow',
+        'gt_backward_flow',
+        'gt_occ_has_invalid_frame',
+        'gt_occ_img_is_valid',
+        'gt_future_boxes',
+        'gt_future_labels',
+        'sdc_planning',
+        'sdc_planning_mask',
+        'command',
+    ]),
+]
 data = dict(
     samples_per_gpu=1,
     workers_per_gpu=8,
@@ -676,6 +747,53 @@ data = dict(
         use_nonlinear_optimizer=use_nonlinear_optimizer,
         classes=class_names,
         modality=input_modality,
+        eval_mod=['det', 'map', 'track'],
+    ),
+    # Alias: test split with GT track info (mirrors base_track_map test_llava_with_track_gt)
+    test_llava_with_track_gt=dict(
+        type=dataset_type,
+        file_client_args=file_client_args,
+        data_root=data_root,
+        test_mode=True,
+        ann_file=ann_file_test,
+        pipeline=train_fusionad_with_track_gt_pipeline,
+        patch_size=patch_size,
+        canvas_size=canvas_size,
+        bev_size=(bev_h_, bev_w_),
+        predict_steps=predict_steps,
+        past_steps=past_steps,
+        fut_steps=fut_steps,
+        occ_n_future=occ_n_future_max,
+        use_nonlinear_optimizer=use_nonlinear_optimizer,
+        classes=class_names,
+        modality=input_modality,
+        eval_mod=['det', 'map', 'track'],
+    ),
+    # -----------------------------------------------------------------------
+    # Stage 3 E2E: online vision tower training (test_mode=False, temporal queue)
+    # Pipeline mirrors train_fusionad_with_track_gt_pipeline but uses training
+    # format (no MultiScaleFlipAug3D wrapper) so NuScenesE2EDataset builds the
+    # temporal queue through prepare_train_data().
+    # -----------------------------------------------------------------------
+    train_llava_and_vision_tower=dict(
+        type=dataset_type,
+        file_client_args=file_client_args,
+        data_root=data_root,
+        ann_file=ann_file_train,
+        pipeline=train_fusionad_e2e_pipeline,
+        patch_size=patch_size,
+        canvas_size=canvas_size,
+        bev_size=(bev_h_, bev_w_),
+        queue_length=queue_length,
+        predict_steps=predict_steps,
+        past_steps=past_steps,
+        fut_steps=fut_steps,
+        occ_n_future=occ_n_future_max,
+        use_nonlinear_optimizer=use_nonlinear_optimizer,
+        classes=class_names,
+        modality=input_modality,
+        test_mode=False,
+        use_valid_flag=True,
         eval_mod=['det', 'map', 'track'],
     ),
     shuffler_sampler=dict(type="DistributedGroupSampler"),

@@ -63,6 +63,13 @@ def load_model_with_deepspeed(args, device):
         **llava_model_args
     )
 
+    # Modality ablation (attribute-based; read in FusionAD.get_bevs()).
+    # Default values on both flags are False, so when neither is passed
+    # this is a no-op — byte-identical to the pre-change behavior.
+    fusionad = model.get_vision_tower().vision_tower.vision_model
+    fusionad.zero_camera = args.zero_camera
+    fusionad.zero_lidar = args.zero_lidar
+
     # DeepSpeed inference configuration
     ds_config = {
         "fp16": {"enabled": args.fp16},
@@ -178,7 +185,12 @@ def inference_planning_oriented_vlm(args):
         frames_upbound=32,
     )
 
-    test_dataset = LLaVANuScenesDataset(tokenizer, data_args, uniad_cfg.data.test, llava_test_mode=True, use_uniad_pth=args.use_uniad_pth)
+    test_dataset = LLaVANuScenesDataset(
+        tokenizer, data_args, uniad_cfg.data.test,
+        llava_test_mode=True,
+        use_uniad_pth=args.use_uniad_pth,
+        skip_build_conversation=args.skip_build_conversation,
+    )
     # test_dataset = LLaVANuScenesDataset(tokenizer, data_args, uniad_cfg.data.test_llava_with_track_gt, llava_test_mode=True, use_uniad_pth=args.use_uniad_pth)
     
     # Initialize DDP sampler
@@ -315,6 +327,13 @@ def main():
                       help="Attention implementation to use")
     parser.add_argument("--fp16", action="store_true", help="Use FP16 precision")
     parser.add_argument("--bf16", action="store_true", help="Use BF16 precision")
+    parser.add_argument("--zero-camera", action="store_true",
+                        help="Zero camera features inside FusionAD.get_bevs (modality ablation; default off)")
+    parser.add_argument("--zero-lidar", action="store_true",
+                        help="Zero lidar features inside FusionAD.get_bevs (modality ablation; default off)")
+    parser.add_argument("--skip-build-conversation", action="store_true",
+                        help="Use JSON's human turn verbatim instead of rebuilding the planning prompt "
+                             "(for QA eval on pre-built prompts; default off, planning eval unchanged)")
     parser.add_argument("--zero-stage", type=int, default=2, choices=[0, 1, 2, 3],
                         help="ZeRO optimization stage")
     

@@ -40,6 +40,7 @@ class LLaVANuScenesDataset(NuScenesE2EDataset):
                  use_uniad_pth: bool = False,
                  in_nuscenes_order: bool = True,
                  skip_build_conversation: bool = False,
+                 include_ego_history: bool = True,
                  *args,
                  **kwargs):
         NuScenesE2EDataset_config.pop('type')
@@ -54,6 +55,7 @@ class LLaVANuScenesDataset(NuScenesE2EDataset):
         self.use_uniad_pth = use_uniad_pth
         self.in_nuscenes_order = in_nuscenes_order
         self.skip_build_conversation = skip_build_conversation
+        self.include_ego_history = include_ego_history
         self.cached_nuscenes_data = pickle.load(open('data/nuscenes/cached_nuscenes_info.pkl', 'rb'))
         if self.use_uniad_pth:
             self.in_nuscenes_order = False
@@ -87,6 +89,7 @@ class LLaVANuScenesDataset(NuScenesE2EDataset):
         print(f"in_nuscenes_order: {self.in_nuscenes_order}")
         print(f"use_uniad_pth: {self.use_uniad_pth}")
         print(f"skip_build_conversation: {self.skip_build_conversation}")
+        print(f"include_ego_history: {self.include_ego_history}")
 
     def _load_conversation_data(self):
         data_path = self.data_args.data_path
@@ -175,31 +178,22 @@ class LLaVANuScenesDataset(NuScenesE2EDataset):
                 sample_token_to_idx[sample_token] = i
 
             # Filter data_infos to stay aligned with list_data_dict.
-            # Always drop tokens missing from the conversation JSON (no placeholders).
-            # In training mode, additionally drop tokens whose 6-step ego future
-            # mask is not fully valid — these are scene-tail samples whose labels
-            # are zero-padded and would poison training. Test/inference mode keeps
-            # every sample so inference runs on the full val set.
+            # Drop only tokens missing from the conversation JSON (no placeholders).
+            # Sample inclusion is entirely controlled by the JSON — the training
+            # JSON is the source of truth for which samples to train on.
             filtered_infos = []
             dropped_no_conv = 0
-            dropped_invalid_future = 0
             for info in self.data_infos:
                 token = info['token']
                 if token not in sample_token_to_idx:
                     dropped_no_conv += 1
                     continue
-                if not self.test_mode:
-                    cached = self.cached_nuscenes_data.get(token)
-                    if cached is None or not np.all(cached['gt_ego_fut_masks'] == 1):
-                        dropped_invalid_future += 1
-                        continue
                 filtered_infos.append(info)
                 self.list_data_dict.append(list_data_dict[sample_token_to_idx[token]])
             self.data_infos = filtered_infos
             rank0_print(
                 f"[LLaVANuScenesDataset] kept {len(filtered_infos)} samples; "
-                f"dropped {dropped_no_conv} (no conv), "
-                f"{dropped_invalid_future} (invalid future, train only)"
+                f"dropped {dropped_no_conv} (no conv)"
             )
         else:
             self.list_data_dict = list_data_dict
@@ -279,7 +273,10 @@ class LLaVANuScenesDataset(NuScenesE2EDataset):
     def _get_llava_train_data(self, idx):
         source = self.list_data_dict[idx]
         if not self.skip_build_conversation:
-            source = build_llava_conversation(source, self.cached_nuscenes_data)
+            source = build_llava_conversation(
+                source, self.cached_nuscenes_data,
+                include_ego_history=self.include_ego_history,
+            )
         sources = [source]
         assert len(sources) == 1
 
@@ -302,7 +299,11 @@ class LLaVANuScenesDataset(NuScenesE2EDataset):
 
     def _get_llava_test_data(self, idx):
         data = self.list_data_dict[idx]
-        data = build_llava_conversation(data, self.cached_nuscenes_data)
+        if not self.skip_build_conversation:
+            data = build_llava_conversation(
+                data, self.cached_nuscenes_data,
+                include_ego_history=self.include_ego_history,
+            )
 
         id = data.get("id", data.get("qa_id", idx))
         question = data['conversations'][0]['value']

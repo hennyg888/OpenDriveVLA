@@ -31,10 +31,10 @@ import pickle
 from prettytable import PrettyTable
 
 from nuscenes import NuScenes
-from projects.fusionad_plugin.datasets.data_utils.vector_map import VectorizedLocalMap
-from projects.fusionad_plugin.datasets.data_utils.rasterize import preprocess_map
-from projects.fusionad_plugin.datasets.eval_utils.map_api import NuScenesMap
-from projects.fusionad_plugin.datasets.data_utils.trajectory_api import NuScenesTraj
+from projects.mmdet3d_plugin.datasets.data_utils.vector_map import VectorizedLocalMap
+from projects.mmdet3d_plugin.datasets.data_utils.rasterize import preprocess_map
+from projects.mmdet3d_plugin.datasets.eval_utils.map_api import NuScenesMap
+from projects.mmdet3d_plugin.datasets.data_utils.trajectory_api import NuScenesTraj
 from .data_utils.data_utils import lidar_nusc_box_to_global, obtain_map_info, output_to_nusc_box, output_to_nusc_box_det
 from nuscenes.prediction import convert_local_coords_to_global
 

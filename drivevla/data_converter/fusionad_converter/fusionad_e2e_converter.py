@@ -37,6 +37,9 @@ PLANNING_STEPS = 6
 COMMAND_LIST   = ["turn right", "turn left", "keep forward"]
 
 
+# ---------------------------------------------------------------------------
+# NuScenes helpers
+# ---------------------------------------------------------------------------
 
 def load_pkl_as_dict(pkl_path):
     """Load temporal pkl and return {sample_token: info}."""
@@ -136,7 +139,11 @@ def format_ego_info(can_bus_data):
     )
 
 
-def convert(split):
+# ---------------------------------------------------------------------------
+# Main conversion
+# ---------------------------------------------------------------------------
+
+def convert(split, keep_end_of_scene=False):
     print(f"Loading NuScenes ({NUSCENES_VER}) ...")
     nusc = NuScenes(version=NUSCENES_VER, dataroot=NUSCENES_ROOT, verbose=False)
 
@@ -153,6 +160,7 @@ def convert(split):
     pth_dir = Path(FUSIONAD_PTH_DIR) / split
     available_tokens = {f.stem for f in pth_dir.glob("*.pth")}
     print(f"  {len(available_tokens)} pth files found in {pth_dir}")
+    print(f"  keep_end_of_scene: {keep_end_of_scene}")
 
     results = []
     skipped_no_pth          = 0
@@ -166,10 +174,12 @@ def convert(split):
         # Skip samples whose 6-step future walks past end of scene.
         # gt_ego_fut_masks is shape (6,); any 0 means that future step is
         # zero-padded (scene ended early) and would poison training.
-        cached = cached_nuscenes_data.get(sample_token)
-        if cached is None or not np.all(cached["gt_ego_fut_masks"] == 1):
-            skipped_invalid_future += 1
-            continue
+        # If keep_end_of_scene=True, these samples are kept (zero-padded future).
+        if not keep_end_of_scene:
+            cached = cached_nuscenes_data.get(sample_token)
+            if cached is None or not np.all(cached["gt_ego_fut_masks"] == 1):
+                skipped_invalid_future += 1
+                continue
 
         # ---- planning trajectory + command ----
         planning_xy, command = compute_planning(nusc, info)
@@ -213,5 +223,13 @@ def convert(split):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--split", choices=["train", "val"], required=True)
+    parser.add_argument(
+        "--keep-end-of-scene",
+        action="store_true",
+        help=(
+            "Keep samples whose 6-step ego future walks past the end of scene "
+            "(future steps zero-padded). Default: skip them."
+        ),
+    )
     args = parser.parse_args()
-    convert(args.split)
+    convert(args.split, keep_end_of_scene=args.keep_end_of_scene)

@@ -19,8 +19,8 @@ class UniadResultsConverter:
             input_dir: Directory containing .pth files
             output_path: Path to save the output json file
         """
-        self.input_dir = Path(f"data/uniad_results_for_vlm/{args.nuscenes_split}")
-        self.output_path = Path(f"data/uniad_results_for_vlm/{args.nuscenes_split}.json")
+        self.input_dir = Path(f"data/fusionad_results_for_vlm/{args.nuscenes_split}")
+        self.output_path = Path(f"data/fusionad_results_for_vlm/{args.nuscenes_split}.json")
         # self.nusc = NuScenes(version=args.nuscenes_version, dataroot='data/nuscenes', verbose=True)
         
     def get_pth_files(self) -> List[Path]:

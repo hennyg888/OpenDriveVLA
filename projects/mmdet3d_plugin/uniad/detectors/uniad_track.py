@@ -19,7 +19,6 @@ from mmdet.models import build_loss
 from einops import rearrange
 from mmdet.models.utils.transformer import inverse_sigmoid
 from ..dense_heads.track_head_plugin import MemoryBank, QueryInteractionModule, Instances, RuntimeTrackerBase
-from mmdet3d.core.bbox.structures.lidar_box3d import LiDARInstance3DBoxes
 
 @DETECTORS.register_module()
 class UniADTrack(MVXTwoStageDetector):
@@ -59,7 +58,7 @@ class UniADTrack(MVXTwoStageDetector):
             iou_thres=0.3,
         ),
         pc_range=None,
-        embed_dims=256,
+        embed_dims=512,
         num_query=900,
         num_classes=10,
         vehicle_id_list=None,
@@ -160,7 +159,7 @@ class UniADTrack(MVXTwoStageDetector):
         img = img.reshape(B * N, C, H, W)
         if self.use_grid_mask:
             img = self.grid_mask(img)
-        img_feats = self.img_backbone(img.to(dtype=self.img_backbone.conv1.weight.dtype))
+        img_feats = self.img_backbone(img)
         if isinstance(img_feats, dict):
             img_feats = list(img_feats.values())
         if self.with_img_neck:
@@ -266,9 +265,9 @@ class UniADTrack(MVXTwoStageDetector):
 
         reference_points = reference_points + velo_pad * time_delta
 
-        ref_pts = reference_points.to(dtype=l2g_r1.dtype) @ l2g_r1 + l2g_t1 - l2g_t2
+        ref_pts = reference_points @ l2g_r1 + l2g_t1 - l2g_t2
 
-        g2l_r = torch.linalg.inv(l2g_r2.to(dtype=torch.float)).type(l2g_r1.dtype)
+        g2l_r = torch.linalg.inv(l2g_r2).type(torch.float)
 
         ref_pts = ref_pts @ g2l_r
 
@@ -353,7 +352,7 @@ class UniADTrack(MVXTwoStageDetector):
             bev_embed = bev_embed.permute(1, 0, 2)
         
         assert bev_embed.shape[0] == self.bev_h * self.bev_w
-        return bev_embed, bev_pos, img_feats[-1]
+        return bev_embed, bev_pos
 
     @auto_fp16(apply_to=("img", "prev_bev"))
     def _forward_single_frame_train(
@@ -383,7 +382,7 @@ class UniADTrack(MVXTwoStageDetector):
                 so no need to call velocity update
         """
         # NOTE: You can replace BEVFormer with other BEV encoder and provide bev_embed here
-        bev_embed, bev_pos, img_feat_2D = self.get_bevs(
+        bev_embed, bev_pos = self.get_bevs(
             img, img_metas,
             prev_img=prev_img, prev_img_metas=prev_img_metas,
         )
@@ -473,7 +472,6 @@ class UniADTrack(MVXTwoStageDetector):
         tmp["track_instances"] = track_instances
         out_track_instances = self.query_interact(tmp)
         out["track_instances"] = out_track_instances
-        out["img_feat_2D"] = img_feat_2D
         return out
 
     def select_active_track_query(self, track_instances, active_index, img_metas, with_mask=True):
@@ -577,12 +575,9 @@ class UniADTrack(MVXTwoStageDetector):
         get_keys = ["bev_embed", "bev_pos",
                     "track_query_embeddings", "track_query_matched_idxes", "track_bbox_results",
                     "sdc_boxes_3d", "sdc_scores_3d", "sdc_track_scores", "sdc_track_bbox_results", "sdc_embedding"]
-        get_keys += ["img_feat_2D"]
-        get_keys += ["track_instances"]
         out.update({k: frame_res[k] for k in get_keys})
         
-        # losses = self.criterion.losses_dict
-        losses = {}
+        losses = self.criterion.losses_dict
         return losses, out
 
     def upsample_bev_if_tiny(self, outs_track):
@@ -656,7 +651,7 @@ class UniADTrack(MVXTwoStageDetector):
         track_instances = Instances.cat([other_inst, active_inst])
 
         # NOTE: You can replace BEVFormer with other BEV encoder and provide bev_embed here
-        bev_embed, bev_pos, img_feat_2D = self.get_bevs(img, img_metas, prev_bev=prev_bev)
+        bev_embed, bev_pos = self.get_bevs(img, img_metas, prev_bev=prev_bev)
         det_output = self.pts_bbox_head.get_detections(
             bev_embed, 
             object_query_embeds=track_instances.query,
@@ -708,7 +703,6 @@ class UniADTrack(MVXTwoStageDetector):
         out["track_instances_fordet"] = track_instances
         out["track_instances"] = out_track_instances
         out["track_obj_idxes"] = track_instances.obj_idxes
-        out["img_feat_2D"] = img_feat_2D
         return out
 
     def simple_test_track(
@@ -737,7 +731,7 @@ class UniADTrack(MVXTwoStageDetector):
             
         else:
             track_instances = self.test_track_instances
-            time_delta = timestamp - self.timestamp
+            time_delta = torch.tensor(timestamp - self.timestamp, dtype=torch.float32)
             l2g_r1 = self.l2g_r_mat
             l2g_t1 = self.l2g_t
             l2g_r2 = l2g_r_mat
@@ -772,11 +766,8 @@ class UniADTrack(MVXTwoStageDetector):
         get_keys = ["bev_embed", "bev_pos", 
                     "track_query_embeddings", "track_bbox_results", 
                     "boxes_3d", "scores_3d", "labels_3d", "track_scores", "track_ids"]
-        get_keys += ["img_feat_2D"]
-        get_keys += ["track_instances_fordet"]
-        get_keys += ["sdc_boxes_3d", "sdc_scores_3d", "sdc_track_scores", "sdc_track_bbox_results"]
         if self.with_motion_head:
-            get_keys += ["sdc_embedding"]
+            get_keys += ["sdc_boxes_3d", "sdc_scores_3d", "sdc_track_scores", "sdc_track_bbox_results", "sdc_embedding"]
         results[0].update({k: frame_res[k] for k in get_keys})
         results = self._det_instances2results(track_instances_fordet, results, img_metas)
         return results
@@ -792,7 +783,7 @@ class UniADTrack(MVXTwoStageDetector):
         bboxes_dict = self.bbox_coder.decode(bbox_dict, with_mask=with_mask, img_metas=img_metas)[0]
         bboxes = bboxes_dict["bboxes"]
         # bboxes[:, 2] = bboxes[:, 2] - bboxes[:, 5] * 0.5
-        bboxes = LiDARInstance3DBoxes(bboxes, 9)
+        bboxes = img_metas[0]["box_type_3d"](bboxes, 9)
         labels = bboxes_dict["labels"]
         scores = bboxes_dict["scores"]
         bbox_index = bboxes_dict["bbox_index"]
@@ -838,7 +829,7 @@ class UniADTrack(MVXTwoStageDetector):
         )
         bboxes_dict = self.bbox_coder.decode(bbox_dict, img_metas=img_metas)[0]
         bboxes = bboxes_dict["bboxes"]
-        bboxes = LiDARInstance3DBoxes(bboxes, 9)
+        bboxes = img_metas[0]["box_type_3d"](bboxes, 9)
         labels = bboxes_dict["labels"]
         scores = bboxes_dict["scores"]
 
@@ -856,4 +847,3 @@ class UniADTrack(MVXTwoStageDetector):
             result_dict = None
 
         return [result_dict]
-

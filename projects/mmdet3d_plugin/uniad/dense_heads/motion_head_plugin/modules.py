@@ -278,3 +278,60 @@ class IntentionInteraction(BaseModule):
         rebatch_x = self.interaction_transformer(rebatch_x)
         out = rebatch_x.view(B, A, P, D)
         return out
+
+
+class ModalInteraction(BaseModule):
+    """
+    Modeling the interaction between anchors (prediction modes).
+    Applied across trajectory prediction modes to enable cross-mode attention.
+    """
+    def __init__(self,
+                 embed_dims=256,
+                 num_heads=8,
+                 dropout=0.1,
+                 batch_first=True,
+                 norm_cfg=None,
+                 init_cfg=None):
+        super().__init__(init_cfg)
+
+        self.batch_first = batch_first
+        self.interaction_transformer = nn.TransformerEncoderLayer(d_model=embed_dims,
+                                                                  nhead=num_heads,
+                                                                  dropout=dropout,
+                                                                  dim_feedforward=embed_dims*2,
+                                                                  batch_first=batch_first)
+
+    def forward(self, query):
+        B, A, P, D = query.shape
+        # B, A, P, D -> B*A, P, D
+        rebatch_x = torch.flatten(query, start_dim=0, end_dim=1)
+        rebatch_x = self.interaction_transformer(rebatch_x)
+        out = rebatch_x.view(B, A, P, D)
+        return out
+
+
+class TopoInteraction(BaseModule):
+    """
+    Modeling the interaction between anchors (topological/lane-based).
+    Applied across lane/map features for structured map understanding.
+    """
+    def __init__(self,
+                 embed_dims=256,
+                 num_heads=8,
+                 dropout=0.1,
+                 batch_first=True,
+                 norm_cfg=None,
+                 init_cfg=None):
+        super().__init__(init_cfg)
+
+        self.batch_first = batch_first
+        self.interaction_transformer = nn.TransformerEncoderLayer(d_model=embed_dims,
+                                                                  nhead=num_heads,
+                                                                  dropout=dropout,
+                                                                  dim_feedforward=embed_dims*2,
+                                                                  batch_first=batch_first)
+
+    def forward(self, query, query_pos=None):
+        if query_pos is not None:
+            query = query + query_pos
+        return self.interaction_transformer(query)

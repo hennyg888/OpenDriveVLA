@@ -13,7 +13,7 @@ import torch.nn as nn
 from mmcv.cnn.bricks.registry import TRANSFORMER_LAYER_SEQUENCE
 from mmcv.cnn.bricks.transformer import build_transformer_layer
 from mmcv.runner.base_module import BaseModule
-from projects.fusionad_plugin.models.utils.functional import (
+from projects.fusionad_plugin_new.models.utils.functional import (
     norm_points,
     pos2posemb2d,
     trajectory_coordinate_transform

@@ -5,11 +5,17 @@ import copy
 import os
 from typing import Dict
 from mmdet3d.core.bbox.iou_calculators import BboxOverlaps3D
+from mmdet3d.core.bbox import get_box_type
 from ..dense_heads.seg_head_plugin import IOU
 from .fusionad_track import FusionADTrack
 from mmdet.models.builder import build_head
 
-@DETECTORS.register_module()
+# box_type_3d is popped from img_metas before batching to avoid collation
+# issues with non-tensor objects.  Re-inject it here so downstream methods
+# such as _track_instances2results can reconstruct 3D bounding boxes.
+_LIDAR_BOX_TYPE, _ = get_box_type('LiDAR')
+
+@DETECTORS.register_module(force=True)
 class FusionAD(FusionADTrack):
     """
     FusionAD: Unifying Detection, Tracking, Segmentation, Motion Forecasting, Occupancy Prediction and Planning for Autonomous Driving
@@ -388,6 +394,32 @@ class FusionAD(FusionADTrack):
 
         return result
 
+    def _prepare_can_bus_delta(self, meta):
+        """Mirror forward_test's can_bus delta + scene_token reset.
+
+        Without this, simple_test_track receives absolute ego pose in can_bus,
+        which makes PerceptionTransformer.get_bev_features shift prev_bev off
+        the BEV grid — temporal state is effectively wiped every frame, so
+        the streaming tracker behaves like a cold start and only 3-5 fresh
+        detections survive per sample.
+        """
+        if meta['scene_token'] != self.prev_frame_info['scene_token']:
+            self.prev_frame_info['prev_bev'] = None
+        self.prev_frame_info['scene_token'] = meta['scene_token']
+        if not self.video_test_mode:
+            self.prev_frame_info['prev_bev'] = None
+
+        tmp_pos = copy.deepcopy(meta['can_bus'][:3])
+        tmp_angle = copy.deepcopy(meta['can_bus'][-1])
+        if self.prev_frame_info['scene_token'] is None:
+            meta['can_bus'][:3] = 0
+            meta['can_bus'][-1] = 0
+        else:
+            meta['can_bus'][:3] -= self.prev_frame_info['prev_pos']
+            meta['can_bus'][-1] -= self.prev_frame_info['prev_angle']
+        self.prev_frame_info['prev_pos'] = tmp_pos
+        self.prev_frame_info['prev_angle'] = tmp_angle
+
     def get_results_for_vlm(self, data):
         """Run inference and return the minimal set of outputs needed by the VLM.
 
@@ -411,57 +443,168 @@ class FusionAD(FusionADTrack):
         points    = data.get('points')
         img_metas = data['img_metas']
         timestamp = data.get('timestamp')
-
-        # Unwrap the MultiScaleFlipAug3D list level (same as forward_test)
-        if isinstance(img,       (list, tuple)): img       = img[0]
-        if isinstance(points,    (list, tuple)): points    = points[0]
-        if isinstance(timestamp, (list, tuple)): timestamp = timestamp[0]
-        if isinstance(img_metas, (list, tuple)) and isinstance(img_metas[0], (list, tuple)):
-            img_metas = img_metas[0]
-
         l2g_t     = data.get('l2g_t')
         l2g_r_mat = data.get('l2g_r_mat')
 
-        # Hook img_neck to capture FPN outputs: tuple of [B*N_cam, C, H, W]
+        # ------------------------------------------------------------------
+        # Detect format:
+        #   Test/offline:  img_metas is [[meta_dict]] (MultiScaleFlipAug3D)
+        #   E2E training:  img_metas is {0: meta0, ..., N-1: metaN-1}
+        #                  (temporal queue from union2one + data_collator)
+        #
+        # After mmcv collate (cpu_only DC) + remove_datacontainer + [0]:
+        #   Training queue arrives as [metas_map] — a 1-element list wrapping
+        #   the int-keyed dict.  Unwrap it so is_training_queue fires correctly.
+        # ------------------------------------------------------------------
+        if (isinstance(img_metas, (list, tuple)) and
+                len(img_metas) == 1 and
+                isinstance(img_metas[0], dict) and
+                len(img_metas[0]) > 0 and
+                isinstance(next(iter(img_metas[0].keys())), int)):
+            img_metas = img_metas[0]
+
+        is_training_queue = (
+            isinstance(img_metas, dict) and
+            len(img_metas) > 0 and
+            isinstance(next(iter(img_metas.keys())), int)
+        )
+
+        if is_training_queue:
+            n = len(img_metas)
+            if isinstance(img, (list, tuple)):
+                img = img[0]
+            # mmcv collate (stack=True DC) prepends a batch=1 dim via
+            # default_collate, giving [1, Q, N_cam, C, H, W].  Squeeze it so
+            # img[k:k+1] correctly yields [1, N_cam, C, H, W] per frame.
+            if isinstance(img, torch.Tensor) and img.dim() == 6 and img.shape[0] == 1:
+                img = img[0]   # [1, Q, N, C, H, W] → [Q, N, C, H, W]
+            if isinstance(points, (list, tuple)):
+                points = points[0]   # first unwrap: [[[pts_list]]] → [[pts_list]]
+                # mmcv collate triple-nests stack=False, cpu_only=False DC;
+                # datacollator doesn't pre-process points, so one more level needed.
+                if (isinstance(points, (list, tuple)) and len(points) == 1 and
+                        isinstance(points[0], (list, tuple))):
+                    points = points[0]  # second unwrap: [[pts_list]] → [pts_list]
+            # l2g_t, l2g_r_mat, timestamp arrive as [[v0,...,v4]] after
+            # remove_datacontainer + datacollector [0] — one extra nesting level
+            # from mmcv collate.  Unwrap to [v0,...,v4] so [k] indexing works.
+            def _unwrap_frame_list(x):
+                if (isinstance(x, (list, tuple)) and len(x) == 1
+                        and isinstance(x[0], (list, tuple))):
+                    return x[0]
+                return x
+            l2g_t     = _unwrap_frame_list(l2g_t)
+            l2g_r_mat = _unwrap_frame_list(l2g_r_mat)
+            timestamp = _unwrap_frame_list(timestamp)
+            last_img_metas = [img_metas[n - 1]]
+        else:
+            # Offline pickle / test mode: unwrap MultiScaleFlipAug3D list level
+            if isinstance(img,       (list, tuple)): img       = img[0]
+            if isinstance(points, (list, tuple)):
+                points = points[0]
+                # mmcv DC(stack=False) produces triple-nesting; apply second
+                # unwrap if still a list-of-lists (not yet a list-of-tensors).
+                if (isinstance(points, (list, tuple)) and len(points) == 1 and
+                        isinstance(points[0], (list, tuple))):
+                    points = points[0]
+            if isinstance(timestamp, (list, tuple)): timestamp = timestamp[0]
+            if isinstance(img_metas, (list, tuple)) and isinstance(img_metas[0], (list, tuple)):
+                img_metas = img_metas[0]
+            n = None
+            last_img_metas = img_metas
+
+        # Hook img_neck to capture FPN outputs: tuple of [B*N_cam, C, H, W].
+        # Map queries are NOT hooked — they come from seg_head.forward_test's
+        # returned result_dict, which carries the panoptic-filtered
+        # `chosen_output_query_things` (mirrors UniAD's panseg path).
         _img_feats = []
         def _neck_hook(m, inp, out):
             _img_feats.clear()
             _img_feats.append(out)
 
-        # Hooks on panseg mask heads to capture map query embeddings.
-        # Each mask head returns (mask, mask_inter, query_inter) where
-        # query_inter has shape [num_layers, B, N_queries, D].
-        _thing_q, _stuff_q = [], []
-        def _things_hook(m, inp, out):
-            _thing_q.clear()
-            _thing_q.append(out[2][-1].squeeze(0))   # [N_things, D]
-        def _stuff_hook(m, inp, out):
-            _stuff_q.clear()
-            _stuff_q.append(out[2][-1].squeeze(0))   # [N_stuff, D]
-
-        h_neck   = self.img_neck.register_forward_hook(_neck_hook)
-        h_things = self.seg_head.things_mask_head.register_forward_hook(_things_hook)
-        h_stuff  = self.seg_head.stuff_mask_head.register_forward_hook(_stuff_hook)
+        h_neck = self.img_neck.register_forward_hook(_neck_hook)
         try:
             with torch.no_grad():
-                result_track = self.simple_test_track(
-                    points, img, l2g_t, l2g_r_mat, img_metas, timestamp
-                )[0]
+                if is_training_queue:
+                    # Process temporal queue frame by frame (simple_test_track is
+                    # a streaming tracker designed for bs=1 sequential input).
+                    # Each call updates the internal prev_bev / track state.
+                    result_track = None
+                    for k in range(n):
+                        img_k       = img[k:k+1]   # [1, N_cam, C, H, W]
+                        meta_k      = [img_metas[k]]
+                        # box_type_3d is popped from img_metas before batching;
+                        # re-inject so _track_instances2results can wrap bboxes.
+                        if 'box_type_3d' not in meta_k[0]:
+                            meta_k[0]['box_type_3d'] = _LIDAR_BOX_TYPE
+                        pts_k       = [points[k]] if points is not None else None
+                        l2g_t_k     = l2g_t[k]     if isinstance(l2g_t,     (list, tuple)) else l2g_t
+                        l2g_r_mat_k = l2g_r_mat[k] if isinstance(l2g_r_mat, (list, tuple)) else l2g_r_mat
+                        ts_k        = timestamp[k]  if isinstance(timestamp, (list, tuple)) else timestamp
+                        self._prepare_can_bus_delta(meta_k[0])
+                        result_track = self.simple_test_track(
+                            pts_k, img_k, l2g_t_k, l2g_r_mat_k, meta_k, ts_k
+                        )[0]
+                else:
+                    # Offline / test path: also ensure box_type_3d is present.
+                    for m in img_metas:
+                        if isinstance(m, dict) and 'box_type_3d' not in m:
+                            m['box_type_3d'] = _LIDAR_BOX_TYPE
+                    self._prepare_can_bus_delta(img_metas[0])
+                    result_track = self.simple_test_track(
+                        points, img, l2g_t, l2g_r_mat, img_metas, timestamp
+                    )[0]
+
                 bev_embed = result_track['bev_embed']
+
+                # panseg_head.forward_test expects gt_lane_masks[0] to be a
+                # 4D tensor (1, N, H, W) of the current (last) frame.
+                # The data structure differs between training-queue and eval paths:
+                #   training-queue: [[[T0,...,T4]]]  (3 list levels, Ti = (Ni,H,W))
+                #   eval offline:   [[stacked_T]]    (2 list levels, stacked_T = (T,N,H,W))
+                # In both cases we want the LAST frame → (N, H, W) → unsqueeze batch dim.
+                def _normalize_lane_gt(x):
+                    if x is None:
+                        return None
+                    # Unwrap first two wrapper levels from mmcv DC collation.
+                    inner = x[0][0] if isinstance(x[0], (list, tuple)) else x[0]
+                    if isinstance(inner, (list, tuple)):
+                        # Training-queue: inner is a list of per-frame tensors.
+                        last = inner[-1]
+                    elif isinstance(inner, torch.Tensor) and inner.dim() in (2, 4):
+                        # Eval path: stacked temporal tensor.
+                        #   dim=4 → (T, N, H, W) temporal masks  → take last frame
+                        #   dim=2 → (T, N)        temporal labels → take last frame
+                        last = inner[-1]
+                    else:
+                        # Single-frame tensor: dim=3 (N,H,W) masks or dim=1 (N,) labels.
+                        last = inner
+                    return [last.unsqueeze(0)]  # [(1, N, H, W)]
+
+                gt_lane_masks_norm = _normalize_lane_gt(data.get('gt_lane_masks'))
+                gt_lane_labels_norm = _normalize_lane_gt(data.get('gt_lane_labels'))
+
                 seg_result = self.seg_head.forward_test(
                     bev_embed,
-                    data.get('gt_lane_labels'),
-                    data.get('gt_lane_masks'),
-                    img_metas,
+                    gt_lane_labels_norm,
+                    gt_lane_masks_norm,
+                    last_img_metas,
                 )
         finally:
             h_neck.remove()
-            h_things.remove()
-            h_stuff.remove()
 
-        # seg_pred_labels: class index of each detected thing instance
+        # seg_instance_counts: per-class instance count from panoptic post-processing.
+        # Panoptic assigns id_unique only to instances that pass mask-area and overlap
+        # quality filters, so no manual score threshold is needed.
         # classes: 0=divider, 1=crossing, 2=contour (num_things_classes=3)
-        seg_pred_labels = seg_result[0]['pts_bbox']['labels'].cpu()
+        import numpy as np
+        panoptic_map = seg_result[0]['pts_bbox']['panoptic'][0]  # (H, W, 2) numpy uint16
+        semantic_map = panoptic_map[:, :, 0].astype(np.int32)
+        instance_map = panoptic_map[:, :, 1].astype(np.int32)
+        seg_instance_counts = {}
+        for cls in range(3):
+            ids = np.unique(instance_map[semantic_map == cls])
+            seg_instance_counts[cls] = int(len(ids[ids > 0]))
 
         # img_feat_2D: use last FPN level, reshape to [1, N_cam, C, H, W]
         feat = _img_feats[0][-1]            # [B*N_cam, C, H, W], B=1
@@ -501,6 +644,12 @@ class FusionAD(FusionADTrack):
             except Exception as e:
                 warnings.warn(f'track_gt_inds_to_embed_idx skipped: {e}')
 
+        # Map queries now come from panseg_head's returned result_dict, which
+        # carries the panoptic-filter survivors (mirrors UniAD). output_query_stuff
+        # is the single stuff decoder query (unfiltered — same as UniAD).
+        chosen_things = seg_result[0].get('chosen_output_query_things')
+        output_stuff  = seg_result[0].get('output_query_stuff')
+
         return dict(
             result_track=dict(
                 track_query_embeddings=result_track.get('track_query_embeddings'),
@@ -508,13 +657,179 @@ class FusionAD(FusionADTrack):
                 track_gt_inds_to_embed_idx=track_gt_inds_to_embed_idx,
             ),
             result_seg=dict(
-                chosen_output_query_things=_thing_q[0] if _thing_q else None,
-                output_query_stuff=_stuff_q[0] if _stuff_q else None,
-                seg_pred_labels=seg_pred_labels,  # class idx per detected instance: 0=divider,1=crossing,2=contour
+                chosen_output_query_things=chosen_things,
+                output_query_stuff=output_stuff,
+                seg_instance_counts=seg_instance_counts,  # {0: n_divider, 1: n_crossing, 2: n_contour}
             ),
-            sample_token=img_metas[0]['sample_idx'],
-            scene_token=img_metas[0]['scene_token'],
+            sample_token=last_img_metas[0]['sample_idx'],
+            scene_token=last_img_metas[0]['scene_token'],
         )
+
+    def _unwrap_inference_inputs(self, data):
+        """Shared preamble for get_results_for_vlm / get_results_for_eval.
+
+        Returns (img, points, l2g_t, l2g_r_mat, timestamp, img_metas,
+                 last_img_metas, is_training_queue, n).
+        """
+        img       = data['img']
+        points    = data.get('points')
+        img_metas = data['img_metas']
+        timestamp = data.get('timestamp')
+        l2g_t     = data.get('l2g_t')
+        l2g_r_mat = data.get('l2g_r_mat')
+
+        if (isinstance(img_metas, (list, tuple)) and
+                len(img_metas) == 1 and
+                isinstance(img_metas[0], dict) and
+                len(img_metas[0]) > 0 and
+                isinstance(next(iter(img_metas[0].keys())), int)):
+            img_metas = img_metas[0]
+
+        is_training_queue = (
+            isinstance(img_metas, dict) and
+            len(img_metas) > 0 and
+            isinstance(next(iter(img_metas.keys())), int)
+        )
+
+        if is_training_queue:
+            n = len(img_metas)
+            if isinstance(img, (list, tuple)):
+                img = img[0]
+            if isinstance(img, torch.Tensor) and img.dim() == 6 and img.shape[0] == 1:
+                img = img[0]
+            if isinstance(points, (list, tuple)):
+                points = points[0]
+                if (isinstance(points, (list, tuple)) and len(points) == 1 and
+                        isinstance(points[0], (list, tuple))):
+                    points = points[0]
+            def _unwrap_frame_list(x):
+                if (isinstance(x, (list, tuple)) and len(x) == 1
+                        and isinstance(x[0], (list, tuple))):
+                    return x[0]
+                return x
+            l2g_t     = _unwrap_frame_list(l2g_t)
+            l2g_r_mat = _unwrap_frame_list(l2g_r_mat)
+            timestamp = _unwrap_frame_list(timestamp)
+            last_img_metas = [img_metas[n - 1]]
+        else:
+            if isinstance(img, (list, tuple)): img = img[0]
+            if isinstance(points, (list, tuple)):
+                points = points[0]
+                if (isinstance(points, (list, tuple)) and len(points) == 1 and
+                        isinstance(points[0], (list, tuple))):
+                    points = points[0]
+            if isinstance(timestamp, (list, tuple)): timestamp = timestamp[0]
+            if isinstance(img_metas, (list, tuple)) and isinstance(img_metas[0], (list, tuple)):
+                img_metas = img_metas[0]
+            n = None
+            last_img_metas = img_metas
+
+        return img, points, l2g_t, l2g_r_mat, timestamp, img_metas, last_img_metas, is_training_queue, n
+
+    def _run_track_streaming(self, img, points, l2g_t, l2g_r_mat, timestamp,
+                             img_metas, is_training_queue, n):
+        """Call simple_test_track with the can_bus delta fix applied.
+
+        Single place for the tracker invocation so get_results_for_vlm and
+        get_results_for_eval stay byte-identical on the tracker side.
+        """
+        if is_training_queue:
+            result_track = None
+            for k in range(n):
+                img_k       = img[k:k+1]
+                meta_k      = [img_metas[k]]
+                if 'box_type_3d' not in meta_k[0]:
+                    meta_k[0]['box_type_3d'] = _LIDAR_BOX_TYPE
+                pts_k       = [points[k]] if points is not None else None
+                l2g_t_k     = l2g_t[k]     if isinstance(l2g_t,     (list, tuple)) else l2g_t
+                l2g_r_mat_k = l2g_r_mat[k] if isinstance(l2g_r_mat, (list, tuple)) else l2g_r_mat
+                ts_k        = timestamp[k] if isinstance(timestamp, (list, tuple)) else timestamp
+                self._prepare_can_bus_delta(meta_k[0])
+                result_track = self.simple_test_track(
+                    pts_k, img_k, l2g_t_k, l2g_r_mat_k, meta_k, ts_k
+                )[0]
+        else:
+            for m in img_metas:
+                if isinstance(m, dict) and 'box_type_3d' not in m:
+                    m['box_type_3d'] = _LIDAR_BOX_TYPE
+            self._prepare_can_bus_delta(img_metas[0])
+            result_track = self.simple_test_track(
+                points, img, l2g_t, l2g_r_mat, img_metas, timestamp
+            )[0]
+        return self.upsample_bev_if_tiny(result_track)
+
+    @staticmethod
+    def _normalize_lane_gt(x):
+        if x is None:
+            return None
+        inner = x[0][0] if isinstance(x[0], (list, tuple)) else x[0]
+        if isinstance(inner, (list, tuple)):
+            last = inner[-1]
+        elif isinstance(inner, torch.Tensor) and inner.dim() in (2, 4):
+            last = inner[-1]
+        else:
+            last = inner
+        return [last.unsqueeze(0)]
+
+    def get_results_for_eval(self, data, rescale=True):
+        """Run the same inference as get_results_for_vlm but return the keys
+        NuScenesE2EDataset.evaluate consumes for track / det / map metrics.
+
+        The returned per-sample dict matches the shape produced by forward_test
+        (merged result_track + result_seg + token), so the output of this
+        method across the whole val split can be passed directly to
+        `dataset.evaluate(results, metric='bbox')` to compute AMOTA / NDS /
+        map IoU.
+
+        Returns (per sample):
+            dict with keys including:
+                token           str   sample_idx
+                boxes_3d        LiDARInstance3DBoxes (CPU)
+                scores_3d       Tensor [N]
+                labels_3d       Tensor [N]
+                track_ids       Tensor [N]
+                track_scores    Tensor [N]
+                track_bbox_results  list[...]
+                ret_iou         dict  (drivable/lanes/divider/crossing/contour IoU)
+                scene_token     str  (bonus, not consumed by evaluate)
+        """
+        (img, points, l2g_t, l2g_r_mat, timestamp,
+         img_metas, last_img_metas, is_training_queue, n) = self._unwrap_inference_inputs(data)
+
+        with torch.no_grad():
+            result_track = self._run_track_streaming(
+                img, points, l2g_t, l2g_r_mat, timestamp,
+                img_metas, is_training_queue, n,
+            )
+
+            result_seg = None
+            if self.with_seg_head:
+                gt_lane_masks_norm  = self._normalize_lane_gt(data.get('gt_lane_masks'))
+                gt_lane_labels_norm = self._normalize_lane_gt(data.get('gt_lane_labels'))
+                result_seg = self.seg_head.forward_test(
+                    result_track['bev_embed'],
+                    gt_lane_labels_norm,
+                    gt_lane_masks_norm,
+                    last_img_metas,
+                    rescale,
+                )[0]
+
+        # Match forward_test's per-sample payload shape.
+        pop_track_list = ['prev_bev', 'bev_pos', 'bev_embed',
+                          'track_query_embeddings', 'sdc_embedding']
+        result_track = pop_elem_in_result(result_track, pop_track_list)
+        if result_seg is not None and 'args_tuple' in result_seg:
+            del result_seg['args_tuple']
+        if result_seg is not None:
+            result_seg = pop_elem_in_result(result_seg, pop_list=['pts_bbox'])
+
+        res = dict()
+        res['token'] = last_img_metas[0]['sample_idx']
+        res['scene_token'] = last_img_metas[0]['scene_token']
+        res.update(result_track)
+        if result_seg is not None:
+            res.update(result_seg)
+        return res
 
 
 def pop_elem_in_result(task_result:dict, pop_list:list=None):

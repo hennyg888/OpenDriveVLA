@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from mmdet.models.builder import HEADS, build_loss
 from einops import rearrange
-from projects.mmdet3d_plugin.models.utils.functional import bivariate_gaussian_activation
+from projects.fusionad_plugin_new.models.utils.functional import bivariate_gaussian_activation
 from .planning_head_plugin import CollisionNonlinearOptimizer
 import numpy as np
 import copy

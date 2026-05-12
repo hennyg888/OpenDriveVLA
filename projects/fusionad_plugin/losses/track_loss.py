@@ -18,14 +18,14 @@ import torch.nn.functional as F
 import torch.distributed as dist
 import torch.nn as nn
 from typing import List
-from projects.fusionad_plugin.fusionad.dense_heads.track_head_plugin import Instances
+from projects.fusionad_plugin_new.fusionad.dense_heads.track_head_plugin import Instances
 from mmdet.core import build_assigner
 from mmdet.models import build_loss
 from mmdet.models.builder import LOSSES
 from mmdet.core import reduce_mean
 from mmdet3d.core.bbox.iou_calculators.iou3d_calculator import (
     bbox_overlaps_nearest_3d as iou_3d, )
-from projects.fusionad_plugin.core.bbox.util import denormalize_bbox
+from projects.mmdet3d_plugin.core.bbox.util import denormalize_bbox
 
 
 def is_dist_avail_and_initialized():

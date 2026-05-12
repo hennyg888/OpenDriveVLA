@@ -1,7 +1,7 @@
 from .track_instance import Instances
 from mmdet3d.core.bbox.iou_calculators.iou3d_calculator import (
     bbox_overlaps_nearest_3d as iou_3d, )
-from projects.fusionad_plugin.core.bbox.util import denormalize_bbox
+from projects.fusionad_plugin_new.core.bbox.util import denormalize_bbox
 
 class RuntimeTrackerBase(object):
     def __init__(self, score_thresh=0.5, filter_score_thresh=0.4,  miss_tolerance=5):

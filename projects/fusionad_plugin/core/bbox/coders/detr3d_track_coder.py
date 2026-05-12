@@ -4,7 +4,7 @@ import torch
 
 from mmdet.core.bbox import BaseBBoxCoder
 from mmdet.core.bbox.builder import BBOX_CODERS
-from projects.fusionad_plugin.core.bbox.util import normalize_bbox, denormalize_bbox
+from projects.fusionad_plugin_new.core.bbox.util import normalize_bbox, denormalize_bbox
 from mmdet3d.core import xywhr2xyxyr
 from mmcv.ops import nms_bev
 

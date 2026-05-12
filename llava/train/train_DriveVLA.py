@@ -379,7 +379,7 @@ def train_DriveVLA(attn_implementation=None):
                                   "projects/configs/stage1_track_map/base_track_map.py")
     uniad_cfg: Config = Config.fromfile(_nuscenes_cfg_file)
 
-    train_dataset = LLaVANuScenesDataset(tokenizer, data_args, uniad_cfg.data.train_llava_and_vision_tower, llava_train_mode=True, use_uniad_pth=data_args.use_uniad_pth, in_nuscenes_order=data_args.in_nuscenes_order, skip_build_conversation=data_args.skip_build_conversation)
+    train_dataset = LLaVANuScenesDataset(tokenizer, data_args, uniad_cfg.data.train_llava_and_vision_tower, llava_train_mode=True, use_uniad_pth=data_args.use_uniad_pth, in_nuscenes_order=data_args.in_nuscenes_order, skip_build_conversation=data_args.skip_build_conversation, include_ego_history=data_args.include_ego_history)
     # train_dataset = LLaVANuScenesDataset(tokenizer, data_args, uniad_cfg.data.train_llava_without_track_gt, llava_train_mode=True, use_uniad_pth=data_args.use_uniad_pth, in_nuscenes_order=data_args.in_nuscenes_order)
     data_collator = DataCollatorForLLaVANuScenesDataset(tokenizer=tokenizer, llava_train_mode=True)
     

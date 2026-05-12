@@ -17,9 +17,9 @@ from mmdet.datasets import (build_dataset,
 from mmdet.utils import get_root_logger
 import time
 import os.path as osp
-from projects.fusionad_plugin.datasets.builder import build_dataloader
-from projects.fusionad_plugin.core.evaluation.eval_hooks import CustomDistEvalHook
-from projects.fusionad_plugin.datasets import custom_build_dataset
+from projects.fusionad_plugin_new.datasets.builder import build_dataloader
+from projects.fusionad_plugin_new.core.evaluation.eval_hooks import CustomDistEvalHook
+from projects.fusionad_plugin_new.datasets import custom_build_dataset
 
 def custom_train_detector(model,
                    dataset,

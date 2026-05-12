@@ -39,10 +39,12 @@ class TrajLoss(nn.Module):
         self.loss_weight_minfde = loss_weight_minfde
 
     def forward(self,
-                traj_prob, 
-                traj_preds, 
-                gt_future_traj, 
-                gt_future_traj_valid_mask):
+                traj_prob,
+                traj_preds,
+                gt_future_traj,
+                gt_future_traj_valid_mask,
+                offset_preds=None,
+                need_refine=False):
         """
         Compute MTP loss
         :param predictions: Dictionary with 'traj': predicted trajectories
@@ -86,13 +88,56 @@ class TrajLoss(nn.Module):
         # Compute classification loss
         l_class = - torch.squeeze(log_probs.gather(1, inds.unsqueeze(1)))
 
-        l_reg = torch.sum(l_reg)/(batch_size + 1e-5) 
-        l_class = torch.sum(l_class)/(batch_size + 1e-5)
-        l_minade = torch.sum(l_minade)/(batch_size + 1e-5) 
-        l_minfde = torch.sum(l_minfde)/(batch_size + 1e-5) 
+        if need_refine and offset_preds is not None:
+            offset_best = offset_preds[torch.arange(batch_size), inds]
+            l_minade, l_refine = refine_loss(traj_best, traj_gt, masks, offset_best)
+        else:
+            l_refine = torch.zeros_like(l_minfde)
 
-        loss = l_class * self.cls_loss_weight + l_reg * self.nll_loss_weight + l_minade * self.loss_weight_minade + l_minfde * self.loss_weight_minfde
-        return loss, l_class, l_reg, l_minade, l_minfde, l_mr
+        l_reg = torch.sum(l_reg)/(batch_size + 1e-5)
+        l_class = torch.sum(l_class)/(batch_size + 1e-5)
+        l_minade = torch.sum(l_minade)/(batch_size + 1e-5)
+        l_minfde = torch.sum(l_minfde)/(batch_size + 1e-5)
+        l_refine = torch.sum(l_refine)/(batch_size + 1e-5)
+
+        loss = l_class * self.cls_loss_weight + l_reg * self.nll_loss_weight + l_minade * self.loss_weight_minade + l_minfde * self.loss_weight_minfde + l_refine
+        return loss, l_class, l_reg, l_minade, l_minfde, l_mr, l_refine
+
+def refine_loss(traj_best, traj_gt, mask, offset_best):
+    """SmoothL1 refinement loss for trajectory offset predictions."""
+    loss_fn = nn.SmoothL1Loss(reduction='none')
+    mask = (1 - mask).bool()
+    err = (traj_best[:, :, :2] + offset_best) - traj_gt
+    err = torch.pow(err, exponent=2)
+    err = torch.sum(err, dim=2)
+    err = torch.pow(err, exponent=0.5)
+    err = torch.sum(err * mask, dim=1) / \
+        torch.clip(torch.sum(mask, dim=1), min=1)
+    refine_err = loss_fn(offset_best.float(), (traj_gt - traj_best[:, :, :2]).detach().float()).sum(-1)
+    refine_err = torch.sum(refine_err * mask, dim=1) / torch.clip(torch.sum(mask, dim=1), min=1)
+    return err.float(), refine_err
+
+
+def laplacenllLoss(pred: torch.Tensor,
+                   target: torch.Tensor,
+                   mask: torch.Tensor,
+                   eps=1e-6):
+    """Laplace negative log-likelihood loss for trajectory prediction."""
+    pred = pred.transpose(1, 0)
+    num_nodes = pred.size(1)
+    mask = (1 - mask).bool()
+    l2_norm = (torch.norm(pred[:, :, :, :2] - target, p=2, dim=-1) * mask).sum(dim=-1)  # [F, N]
+    best_mode = l2_norm.argmin(dim=0)
+    traj_best = pred[best_mode, torch.arange(num_nodes)]
+    traj_best = traj_best[mask]
+    target = target[mask]
+    loc, scale = traj_best.chunk(2, dim=-1)
+    scale = scale.clone()
+    with torch.no_grad():
+        scale.clamp_(min=eps)
+    nll = torch.log(2 * scale) + torch.abs(target - loc) / scale
+    return nll.mean()
+
 
 def min_ade(traj: torch.Tensor, traj_gt: torch.Tensor,
             masks: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:

@@ -94,6 +94,9 @@ class FusionADTrackMapModel(PreTrainedModel):
     def forward(self, data):
         return self.vision_model.get_results_for_vlm(data)
 
+    def get_results_for_eval(self, data):
+        return self.vision_model.get_results_for_eval(data)
+
 
 class FusionADVisionTower(nn.Module):
     def __init__(self, vision_tower, vision_tower_cfg, delay_load=False):
@@ -178,6 +181,9 @@ class FusionADVisionTower(nn.Module):
 
     def forward(self, data):
         return self.vision_tower(data)
+
+    def get_results_for_eval(self, data):
+        return self.vision_tower.get_results_for_eval(data)
 
     @property
     def dtype(self):

@@ -239,6 +239,7 @@ class QueryInteractionModule(QueryInteractionBase):
                 active_track_instances = self._add_fp_tracks(
                     track_instances, active_track_instances)
         else:
+            print(f"[INFO] eval mode: select active tracks with obj_idxes >= 0")
             active_track_instances = track_instances[
                 track_instances.obj_idxes >= 0]
 

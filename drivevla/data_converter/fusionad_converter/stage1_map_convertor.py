@@ -1,8 +1,9 @@
 """
 Build Stage 1 map caption training data from FusionAD seg predictions.
 
-Caption text uses predicted instance counts from result_seg['seg_pred_labels']
+Caption text uses predicted instance counts from result_seg['seg_instance_counts']
 stored in per-sample .pth files (produced by pickle_fusionad_pth.py).
+seg_instance_counts is a dict {0: n, 1: n, 2: n} derived from panoptic post-processing.
 
 FusionAD panseg_head has 3 thing classes (num_things_classes=3):
   class 0 → divider  (road_divider + lane_divider merged, same as VectorizedLocalMap CLASS2LABEL)
@@ -28,8 +29,8 @@ Usage:
 import os
 import json
 import argparse
-import torch
 from tqdm import tqdm
+import torch
 
 FUSIONAD_PTH_DIR = "data/fusionad_results_for_vlm"
 
@@ -49,15 +50,17 @@ CLASS_LABELS = {
 }
 
 
-def count_from_seg_pred_labels(seg_pred_labels) -> dict:
-    """Count predicted instances per class from seg_pred_labels tensor."""
+def read_seg_instance_counts(seg_instance_counts) -> dict:
+    """Return instance counts per class from seg_instance_counts dict.
+
+    seg_instance_counts is {0: n_dividers, 1: n_ped_crossings, 2: n_contours}
+    as produced by panoptic post-processing in fusionad_e2e.py.
+    """
     counts = {0: 0, 1: 0, 2: 0}
-    if seg_pred_labels is None:
+    if not isinstance(seg_instance_counts, dict):
         return counts
-    if not isinstance(seg_pred_labels, torch.Tensor):
-        seg_pred_labels = torch.tensor(seg_pred_labels)
     for cls_idx in [0, 1, 2]:
-        counts[cls_idx] = int((seg_pred_labels == cls_idx).sum().item())
+        counts[cls_idx] = int(seg_instance_counts.get(cls_idx, 0))
     return counts
 
 
@@ -108,13 +111,13 @@ def main():
             continue
 
         result_seg = data.get('result_seg', {})
-        seg_pred_labels = result_seg.get('seg_pred_labels', None)
+        seg_instance_counts = result_seg.get('seg_instance_counts', None)
 
-        if seg_pred_labels is None:
+        if seg_instance_counts is None:
             skipped_no_seg += 1
             continue
 
-        counts  = count_from_seg_pred_labels(seg_pred_labels)
+        counts  = read_seg_instance_counts(seg_instance_counts)
         caption = generate_caption(counts)
 
         if caption is None:
@@ -135,7 +138,7 @@ def main():
         json.dump(entries, f, indent=2)
 
     print(f'[map] {args.split}: {len(entries)} entries → {out_path}')
-    print(f'       skipped (no seg_pred_labels): {skipped_no_seg}')
+    print(f'       skipped (no seg_instance_counts): {skipped_no_seg}')
     print(f'       skipped (empty scene):        {skipped_empty}')
 
     yaml_path = os.path.join(args.output_dir, f'stage1_combined_{args.split}.yaml')
